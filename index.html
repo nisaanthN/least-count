@@ -722,7 +722,7 @@ function botEvaluateOnWorld(worldData, action, botP){
     var safety=80;
     while(sim.phase!=='roundover' && sim.phase!=='gameover' && safety-->0){
       var curP=sim.turn;
-      var a = curP === botP ? botSmartPlus(sim, curP) : botSmart(sim, curP);
+      var a = botSmart(sim, curP); /* pure Smart for both sides: cleanest baseline */
       if(!a) break;
       botApplySimAction(sim, curP, a);
     }
@@ -755,14 +755,14 @@ function botHard(g, p, opts){
     var scored=[];
     var moves=botGenerateThrows(g.hands[p]);
     moves.forEach(function(m){
-      var s=botSmartPlusScoreThrow(g, p, m, view);
+      var s=botSmartScoreThrow(g, p, m, view);
       scored.push({action:{t:'discard', cardIds: m.map(function(c){return c.id;})}, smartScore:s});
     });
     if(pts<=5){
       var dScore = botSmartShouldDeclare(g, p, view) ? 45 : -20;
       scored.push({action:{t:'declare'}, smartScore: dScore});
     }
-    if(scored.length===0) return botSmartPlus(g, p);
+    if(scored.length===0) return botSmart(g, p);
     scored.sort(function(a,b){return b.smartScore - a.smartScore;});
     /* 2) Decisive top pick (>= 40 ahead)? Skip rollouts. Otherwise always rollout. */
     if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 40){
@@ -825,7 +825,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v24';
+var BUILD='v25';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
