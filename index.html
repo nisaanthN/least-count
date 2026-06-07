@@ -231,6 +231,7 @@
       <div class="score-wrap" id="scoreWrap"></div>
       <div class="meta" id="metaWrap"></div>
     </div>
+    <div id="saveStripe" class="hide" style="text-align:center; font-size:11px; color:rgba(255,255,255,.45); padding:2px 0;"></div>
     <div class="zone" id="oppZone"></div>
     <div class="table" id="tableZone"></div>
     <div class="status" id="statusLine"></div>
@@ -464,7 +465,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v14';
+var BUILD='v15';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
@@ -571,7 +572,14 @@ function saveSession(){
     var data={mode:mode, code:roomCode, names:[myName,oppName||'Partner'], ts:Date.now(), target:target};
     if(mode==='host' && game) data.game=game.toData();
     localStorage.setItem('lc_session', JSON.stringify(data));
+    updateSaveStripe();
   }catch(e){}
+}
+function updateSaveStripe(){
+  var el=$('saveStripe'); if(!el) return;
+  if(mode==='local'||!roomCode){ el.classList.add('hide'); return; }
+  el.classList.remove('hide');
+  el.innerHTML = 'Auto\u2011saved \u00b7 code <b class="gold">'+escapeHtml(roomCode)+'</b> \u00b7 close the tab anytime; you can both rejoin from the home screen.';
 }
 function loadSession(){
   try{
@@ -1068,6 +1076,8 @@ if(typeof Peer==='undefined'){
   $('btnHost').addEventListener('click',function(){ toast('Online needs an internet connection to set up. Practice mode works offline.',5000); },true);
 }
 show('home'); $('buildstamp').textContent=BUILD;
+window.addEventListener('beforeunload', function(){ if(mode&&mode!=='local') saveSession(); });
+document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='hidden' && mode && mode!=='local') saveSession(); });
 (function(){
   var s=loadSession();
   if(!s)return;
