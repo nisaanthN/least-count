@@ -210,7 +210,16 @@
         <button class="btn btn-primary full" id="btnHost">Create an online game →</button>
         <input id="joinCode" class="field" placeholder="Enter code" maxlength="4" autocomplete="off" style="text-transform:uppercase; text-align:center; letter-spacing:4px; font-weight:700;">
         <button class="btn btn-ghost" id="btnJoin">Join</button>
-        <button class="btn btn-ghost full" id="btnLocal">Practice on this screen (learn the rules)</button>
+        <button class="btn btn-ghost full" id="btnLocal">Practice on this screen (both hands)</button>
+        <div class="full" style="padding-top:10px; border-top:1px solid rgba(255,255,255,.1); margin-top:2px;">
+          <span class="label">Play vs the computer</span>
+          <div class="seg" id="botDiffSeg" style="margin-bottom:10px;">
+            <button class="chip" data-d="easy">Easy</button>
+            <button class="chip active" data-d="smart">Smart</button>
+            <button class="chip" data-d="hard">Hard</button>
+          </div>
+          <button class="btn btn-primary full" id="btnBot">Start vs Computer →</button>
+        </div>
       </div>
       <p class="tiny" style="margin-top:14px;">
         <b>How online works:</b> One of you taps <b>Create</b> and gets a 4‑letter code. Send the code to the other person; they type it into <b>Join</b>. You'll then play in real time, each on your own device — neither of you sees the other's cards.
@@ -474,11 +483,257 @@ Game.prototype.toData=function(){ var k=['target','penalty','names','scores','ro
 Game.fromData=function(d){ var g=Object.create(Game.prototype); for(var key in d)g[key]=d[key]; if(g.pendingJacks===undefined)g.pendingJacks=0; if(g.pendingSevens===undefined)g.pendingSevens=0; if(g.pendingPenalty===undefined)g.pendingPenalty=0; if(g.warStarter===undefined)g.warStarter=null; return g; };
 function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+SUIT_CHAR[c.suit]; }
 
+/* ===== BOT ===== */
+/* Bot plays as player p, given the engine `g`. Returns {t,...} action. */
+function botGenerateThrows(hand){
+  /* Returns array of card-arrays. Always includes each single card, plus per-rank groups of sizes 2..count. */
+  var moves=[];
+  hand.forEach(function(c){ moves.push([c]); });
+  var byRank={};
+  hand.forEach(function(c){ if(!byRank[c.rank])byRank[c.rank]=[]; byRank[c.rank].push(c); });
+  for(var r in byRank){
+    var cs=byRank[r];
+    if(cs.length>=2){
+      for(var k=2;k<=cs.length;k++) moves.push(cs.slice(0,k));
+    }
+  }
+  return moves;
+}
+function botRand(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+/* ----- EASY: random valid move ----- */
+function botEasy(g, p){
+  var view=g.viewFor(p);
+  if(view.phase==='war'){
+    var hand=g.hands[p];
+    var nonSevens=hand.filter(function(c){return c.rank!=='7';});
+    if(nonSevens.length){ return {t:'discard', cardIds:[botRand(nonSevens).id]}; }
+    return {t:'discard', cardIds:[hand[0].id]};
+  }
+  if(view.phase==='discard'){
+    /* Sometimes declare when eligible (random, often wrong). */
+    if(g.handPoints(g.hands[p])<=5 && Math.random()<0.35) return {t:'declare'};
+    /* Random move from all legal singles + sets. */
+    var moves=botGenerateThrows(g.hands[p]);
+    return {t:'discard', cardIds: botRand(moves).map(function(c){return c.id;})};
+  }
+  if(view.phase==='draw'){
+    var pickable=view.floor.filter(function(c){return c.rank!=='7'&&c.rank!=='J';});
+    if(pickable.length && Math.random()<0.4){
+      return {t:'draw', source:'floor', cardId: botRand(pickable).id};
+    }
+    return {t:'draw', source:'deck'};
+  }
+  return {t:'draw', source:'deck'};
+}
+
+/* ----- SMART: heuristic scoring, single-step ----- */
+function botSmartScoreThrow(g, p, cards, view){
+  var handBefore=g.hands[p];
+  var ids={}; cards.forEach(function(c){ids[c.id]=true;});
+  var handAfter=handBefore.filter(function(c){return !ids[c.id];});
+  var ptsAfter=handAfter.reduce(function(s,c){return s+g.cardPoints(c);},0);
+  var ptsRemoved=cards.reduce(function(s,c){return s+g.cardPoints(c);},0);
+  var isBulk=cards.length>=3;
+  var isSeven=cards[0].rank==='7';
+  var isJack=cards[0].rank==='J';
+  var matchesPile=view.floor.length>0 && view.floor[0].rank===cards[0].rank;
+  var skipsDraw=isBulk||matchesPile;
+  var score=-ptsAfter*1.0 + ptsRemoved*0.4;
+  if(skipsDraw) score+=8;
+  if(handAfter.length===0) score+=120; /* triggers auto-win */
+  else if(ptsAfter<=5) score+=30;
+  if(isSeven){
+    /* opp picks 2; potentially counters. Net: cost is the cards thrown, value is the pressure. */
+    if(view.oppHandCount<=4) score-=10; /* don't help opp near declare */
+    else score+=4;
+    if(handAfter.length===0) score+=20; /* if I throw all 7s and go out, great */
+  }
+  if(isJack){
+    if(ptsAfter<=8) score+=14; /* extra turn to declare */
+    else if(ptsAfter<=15) score+=2;
+    else score-=4; /* waste a Jack */
+    if(cards.length>=3 && cards.length%2===1) score+=4; /* odd Jacks = play again, often great */
+  }
+  /* avoid dumping wilds or aces — they're useful to keep */
+  if(cards.length===1 && g.cardPoints(cards[0])===0) score-=6;
+  if(cards.length===1 && cards[0].rank==='A') score-=3;
+  /* pile-bait: don't put a Q on the pile if opp just picked a Q */
+  return score;
+}
+function botSmartShouldDeclare(g, p, view){
+  var pts=g.handPoints(g.hands[p]);
+  if(pts>5) return false;
+  if(view.oppHandCount>=3) return true;
+  return pts===0;
+}
+function botSmartDraw(g, p, view){
+  for(var i=0;i<view.floor.length;i++){
+    var c=view.floor[i];
+    if(c.rank==='7'||c.rank==='J') continue;
+    if(g.cardPoints(c)===0) return {t:'draw', source:'floor', cardId:c.id};
+    if(g.hands[p].some(function(x){return x.rank===c.rank;})) return {t:'draw', source:'floor', cardId:c.id};
+  }
+  return {t:'draw', source:'deck'};
+}
+function botSmartWar(g, p){
+  var hand=g.hands[p];
+  var sevens=hand.filter(function(c){return c.rank==='7';});
+  if(sevens.length) return {t:'discard', cardIds: sevens.map(function(c){return c.id;})};
+  /* No 7. Throw the move that sheds most points (so net hand size + pts is better). */
+  var view=g.viewFor(p);
+  var moves=botGenerateThrows(hand).filter(function(m){return m[0].rank!=='7';});
+  var best=null, bestS=-Infinity;
+  moves.forEach(function(m){
+    var pts=m.reduce(function(s,c){return s+g.cardPoints(c);},0);
+    /* favor: more pts removed, more cards thrown (offset pick), keep low cards */
+    var sc = pts + m.length*1.5;
+    if(sc>bestS){bestS=sc; best=m;}
+  });
+  return {t:'discard', cardIds: best.map(function(c){return c.id;})};
+}
+function botSmart(g, p){
+  var view=g.viewFor(p);
+  if(view.phase==='war') return botSmartWar(g, p);
+  if(view.phase==='discard'){
+    if(botSmartShouldDeclare(g, p, view)) return {t:'declare'};
+    var moves=botGenerateThrows(g.hands[p]);
+    var best=null, bestS=-Infinity;
+    moves.forEach(function(m){
+      var s=botSmartScoreThrow(g, p, m, view);
+      if(s>bestS){bestS=s; best=m;}
+    });
+    return {t:'discard', cardIds: best.map(function(c){return c.id;})};
+  }
+  if(view.phase==='draw') return botSmartDraw(g, p, view);
+  return {t:'draw', source:'deck'};
+}
+
+/* ----- HARD: Monte Carlo rollouts with Smart as the rollout policy ----- */
+function botSampleHidden(sim, botP){
+  var opp=botP^1;
+  var visible={};
+  sim.hands[botP].forEach(function(c){visible[c.id]=true;});
+  sim.floor.forEach(function(c){visible[c.id]=true;});
+  sim.graveyard.forEach(function(c){visible[c.id]=true;});
+  if(sim.wildIndicator) visible[sim.wildIndicator.id]=true;
+  if(sim.pendingDiscard) sim.pendingDiscard.forEach(function(c){visible[c.id]=true;});
+  var fullDeck=makeDeck();
+  var pool=fullDeck.filter(function(c){return !visible[c.id];});
+  /* shuffle in place */
+  for(var i=pool.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var t=pool[i];pool[i]=pool[j];pool[j]=t;}
+  var oppN=sim.hands[opp].length;
+  sim.hands[opp]=pool.slice(0,oppN);
+  sim.deck=pool.slice(oppN);
+}
+function botApplySimAction(sim, p, a){
+  if(a.t==='discard') sim.discard(p, a.cardIds);
+  else if(a.t==='draw') sim.draw(p, a.source, a.cardId);
+  else if(a.t==='declare') sim.declare(p);
+}
+function botRolloutOnce(baseData, p, action){
+  var sim=Game.fromData(JSON.parse(JSON.stringify(baseData)));
+  try{
+    botSampleHidden(sim, p);
+    botApplySimAction(sim, p, action);
+    var safety=80;
+    while(sim.phase!=='roundover' && sim.phase!=='gameover' && safety-->0){
+      var curP=sim.turn;
+      var a=botSmart(sim, curP);
+      if(!a) break;
+      botApplySimAction(sim, curP, a);
+    }
+    if(sim.roundResult){
+      var myD=sim.roundResult.deltas[p];
+      var oppD=sim.roundResult.deltas[p^1];
+      return oppD - myD;
+    }
+  }catch(e){}
+  return 0;
+}
+function botRollout(baseData, p, action, count){
+  var sum=0, n=0;
+  for(var i=0;i<count;i++){
+    var r=botRolloutOnce(baseData, p, action);
+    sum+=r; n++;
+  }
+  return n>0 ? sum/n : 0;
+}
+function botHard(g, p, opts){
+  var view=g.viewFor(p);
+  opts=opts||{}; var perMove=opts.rollouts||60;
+  if(view.phase==='war'){
+    /* War decisions are usually clear; defer to Smart but compare counter vs throw via rollouts. */
+    var hand=g.hands[p];
+    var sevens=hand.filter(function(c){return c.rank==='7';});
+    var baseData=g.toData();
+    var cands=[];
+    if(sevens.length) cands.push({t:'discard', cardIds: sevens.map(function(c){return c.id;})});
+    /* Each non-7 throw option */
+    botGenerateThrows(hand).forEach(function(m){
+      if(m[0].rank==='7') return;
+      cands.push({t:'discard', cardIds: m.map(function(c){return c.id;})});
+    });
+    if(cands.length===0) return botSmartWar(g, p);
+    return botPickBest(cands, baseData, p, perMove);
+  }
+  if(view.phase==='discard'){
+    var pts=g.handPoints(g.hands[p]);
+    var baseData2=g.toData();
+    var cands2=[];
+    var moves=botGenerateThrows(g.hands[p]);
+    moves.forEach(function(m){
+      cands2.push({t:'discard', cardIds: m.map(function(c){return c.id;})});
+    });
+    if(pts<=5) cands2.push({t:'declare'});
+    if(cands2.length===0) return botSmart(g, p);
+    return botPickBest(cands2, baseData2, p, perMove);
+  }
+  if(view.phase==='draw'){
+    var baseData3=g.toData();
+    var cands3=[{t:'draw', source:'deck'}];
+    view.floor.forEach(function(c){
+      if(c.rank!=='7' && c.rank!=='J') cands3.push({t:'draw', source:'floor', cardId:c.id});
+    });
+    return botPickBest(cands3, baseData3, p, perMove);
+  }
+  return botSmart(g, p);
+}
+function botPickBest(cands, baseData, p, perMove){
+  /* Quick sanity: skip rollouts if only one candidate. */
+  if(cands.length===1) return cands[0];
+  var best=cands[0], bestS=-Infinity;
+  cands.forEach(function(a){
+    var s=botRollout(baseData, p, a, perMove);
+    if(s>bestS){bestS=s; best=a;}
+  });
+  return best;
+}
+function botMove(g, p, difficulty){
+  try{
+    if(difficulty==='easy') return botEasy(g, p);
+    if(difficulty==='hard'){
+      /* Budget: aim for ~300+ rollouts total. */
+      var view=g.viewFor(p);
+      var moveCount=view.phase==='draw' ? (1 + view.floor.filter(function(c){return c.rank!=='7'&&c.rank!=='J';}).length) : botGenerateThrows(g.hands[p]).length + (g.handPoints(g.hands[p])<=5?1:0);
+      var perMove=Math.max(40, Math.ceil(400/Math.max(1,moveCount)));
+      return botHard(g, p, {rollouts:perMove});
+    }
+    return botSmart(g, p);
+  }catch(e){
+    /* Fallback to random valid move on any error */
+    try{ return botEasy(g, p); }catch(_){ return null; }
+  }
+}
+
 /* ===== APP STATE ===== */
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v17';
+var BUILD='v18';
+var BOT_PLAYER=1;
+var botDifficulty='smart';
+var botPending=false;
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
@@ -583,8 +838,9 @@ function saveSession(){
   if(!mode)return;
   try{
     var data={mode:mode, names:[myName,oppName||'Partner'], ts:Date.now(), target:target};
-    if(mode!=='local') data.code=roomCode;
-    if((mode==='host'||mode==='local') && game) data.game=game.toData();
+    if(mode!=='local' && mode!=='bot') data.code=roomCode;
+    if((mode==='host'||mode==='local'||mode==='bot') && game) data.game=game.toData();
+    if(mode==='bot') data.botDifficulty=botDifficulty;
     localStorage.setItem('lc_session', JSON.stringify(data));
     updateSaveStripe();
   }catch(e){}
@@ -593,7 +849,7 @@ function updateSaveStripe(){
   var el=$('saveStripe'); if(!el) return;
   if(!mode){ el.classList.add('hide'); return; }
   el.classList.remove('hide');
-  if(mode==='local'){
+  if(mode==='local'||mode==='bot'){
     el.innerHTML = 'Auto\u2011saved \u00b7 close the tab anytime; resume from the home screen.';
   } else {
     el.innerHTML = 'Auto\u2011saved \u00b7 code <b class="gold">'+escapeHtml(roomCode||'')+'</b> \u00b7 close the tab anytime; you can both rejoin from the home screen.';
@@ -604,8 +860,8 @@ function loadSession(){
     var s=localStorage.getItem('lc_session'); if(!s)return null;
     var o=JSON.parse(s); if(!o||Date.now()-o.ts>6*3600*1000){ clearSession(); return null; }
     if(!o.mode){ clearSession(); return null; }
-    if((o.mode==='host'||o.mode==='local') && !o.game){ clearSession(); return null; }
-    if(o.mode!=='local' && !o.code){ clearSession(); return null; }
+    if((o.mode==='host'||o.mode==='local'||o.mode==='bot') && !o.game){ clearSession(); return null; }
+    if(o.mode!=='local' && o.mode!=='bot' && !o.code){ clearSession(); return null; }
     return o;
   }catch(e){ return null; }
 }
@@ -630,12 +886,14 @@ $('targetSeg').addEventListener('click',function(e){ var c=e.target.closest('.ch
 $('btnHost').addEventListener('click',function(){ myName=(($('nameInput').value||'Player 1').trim().slice(0,14))||'Player 1'; startHost(); });
 $('btnJoin').addEventListener('click',function(){ var code=(($('joinCode').value||'').trim().toUpperCase()); if(code.length<4){toast('Enter the 4\u2011letter code your partner gave you.');return;} myName=(($('nameInput').value||'Player 2').trim().slice(0,14))||'Player 2'; startJoin(code); });
 $('btnLocal').addEventListener('click',function(){ myName=(($('nameInput').value||'Player 1').trim().slice(0,14))||'Player 1'; startLocal(); });
+$('botDiffSeg').addEventListener('click',function(e){ var c=e.target.closest('.chip'); if(!c)return; var kids=$('botDiffSeg').children; for(var i=0;i<kids.length;i++)kids[i].classList.remove('active'); c.classList.add('active'); botDifficulty=c.dataset.d; });
+$('btnBot').addEventListener('click',function(){ myName=(($('nameInput').value||'You').trim().slice(0,14))||'You'; startBot(); });
 $('joinCode').addEventListener('keydown',function(e){ if(e.key==='Enter')$('btnJoin').click(); });
 $('btnRules').addEventListener('click',showRules);
 $('btnRules2').addEventListener('click',showRules);
 $('btnQuit').addEventListener('click',function(){
   var html, yesLabel='Leave';
-  if(mode==='local'){
+  if(mode==='local'||mode==='bot'){
     html='The game is auto\u2011saved \u2014 you can resume it from the home screen.';
   } else if(roomCode){
     html='You\u2019ll be disconnected, but <b>both of you can rejoin</b> using code <b class="gold">'+escapeHtml(roomCode)+'</b>. The game state is saved.';
@@ -759,6 +1017,7 @@ function applyLocal(a){
     else if(a.t==='playAgain'){ game=new Game({target:game.target, names:game.names.slice()}); }
   }catch(e){ toast(e.message); selected.clear(); render(); return; }
   selected.clear(); render(); saveSession();
+  if(mode==='bot') maybeBotMove();
 }
 function startLocal(){ clearSession(); mode='local'; connected=true; game=new Game({target:target, names:[myName||'Player 1','Player 2']}); show('game'); render(); saveSession(); }
 function resumeLocal(s){
@@ -769,6 +1028,51 @@ function resumeLocal(s){
   target=game.target;
   show('game'); render();
 }
+function botLabelFor(d){ return d==='easy'?'Easy':d==='hard'?'Hard':'Smart'; }
+function startBot(){
+  clearSession();
+  mode='bot'; connected=true; botPending=false;
+  var nm=myName||'You';
+  var botName='Computer ('+botLabelFor(botDifficulty)+')';
+  oppName=botName;
+  game=new Game({target:target, names:[nm, botName]});
+  show('game'); render(); saveSession();
+  maybeBotMove();
+}
+function resumeBot(s){
+  mode='bot'; connected=true; botPending=false;
+  myName=(s.names&&s.names[0])||'You';
+  botDifficulty=s.botDifficulty||'smart';
+  game=Game.fromData(s.game);
+  if(s.names&&s.names[1]){ game.names[1]=s.names[1]; oppName=s.names[1]; }
+  target=game.target;
+  show('game'); render();
+  maybeBotMove();
+}
+function maybeBotMove(){
+  if(mode!=='bot') return;
+  if(!game) return;
+  if(game.phase==='roundover'||game.phase==='gameover') return;
+  if(game.turn!==BOT_PLAYER) return;
+  if(botPending) return;
+  botPending=true;
+  setTimeout(function(){
+    botPending=false;
+    if(mode!=='bot'||!game||game.turn!==BOT_PLAYER) return;
+    if(game.phase==='roundover'||game.phase==='gameover') return;
+    var t0=Date.now();
+    var action=botMove(game, BOT_PLAYER, botDifficulty);
+    var elapsed=Date.now()-t0;
+    /* if bot was very fast, ensure minimum 250ms perceived thinking */
+    var pad=Math.max(0, 250-elapsed);
+    setTimeout(function(){
+      if(mode!=='bot'||!game||game.turn!==BOT_PLAYER) return;
+      if(game.phase==='roundover'||game.phase==='gameover') return;
+      if(!action){ /* shouldn't happen */ return; }
+      applyLocal(action);
+    }, pad);
+  }, 50);
+}
 
 /* ===== RENDERING ===== */
 function currentView(){
@@ -777,6 +1081,15 @@ function currentView(){
     v.oppHand=game.hands[p^1].map(function(c){return {id:c.id,rank:c.rank,suit:c.suit,pts:game.cardPoints(c)};});
     v.oppPoints=game.handPoints(game.hands[p^1]);
     v.practice=true; return v;
+  }
+  if(mode==='bot'){
+    /* Always render from the human's perspective (player 0). */
+    var v2=game.viewFor(0);
+    /* For testing, show bot's hand face-up. Set practice flag so reveal renders. */
+    v2.oppHand=game.hands[1].map(function(c){return {id:c.id,rank:c.rank,suit:c.suit,pts:game.cardPoints(c)};});
+    v2.oppPoints=game.handPoints(game.hands[1]);
+    v2.practice=true; v2.bot=true;
+    return v2;
   }
   return myView;
 }
@@ -805,7 +1118,7 @@ function render(){
   var sw=$('scoreWrap'); sw.innerHTML='';
   [me,oppIdx].forEach(function(idx){
     var div=document.createElement('div'); div.className='score'+(v.turn===idx?' turn':'');
-    var nm = idx===me ? (mode==='local'? v.names[idx] : v.names[idx]+' (you)') : v.names[idx];
+    var nm = idx===me ? ((mode==='local')? v.names[idx] : v.names[idx]+' (you)') : v.names[idx];
     div.innerHTML='<div class="nm">'+escapeHtml(nm)+'</div><div class="pt">'+v.scores[idx]+'</div>';
     sw.appendChild(div);
   });
@@ -902,11 +1215,14 @@ function render(){
 function statusText(v){
   if(v.phase==='roundover'||v.phase==='gameover') return '<span class="em">'+escapeHtml(v.lastAction)+'</span>';
   if(v.phase==='war'){
-    if(mode!=='local'&&!v.yourTurn) return 'Waiting \u2014 <span class="em">'+escapeHtml(v.names[v.you^1])+'</span> must throw (counter with a 7 or take +<b>'+v.pendingPenalty+'</b>).';
+    if((mode==='host'||mode==='join'||mode==='bot')&&!v.yourTurn){
+      return mode==='bot' ? '<span class="em">Computer</span> faces the 7\u2011war (must counter or pick +<b>'+v.pendingPenalty+'</b>)\u2026'
+        : 'Waiting \u2014 <span class="em">'+escapeHtml(v.names[v.you^1])+'</span> must throw (counter with a 7 or take +<b>'+v.pendingPenalty+'</b>).';
+    }
     var who = mode==='local'? escapeHtml(v.names[v.turn])+', throw' : 'Throw';
     return '<span class="em">7\u2011war!</span> '+who+' a card \u2014 a 7 counters, anything else picks up <b>'+v.pendingPenalty+'</b>.';
   }
-  if(mode!=='local'&&!v.yourTurn) return 'Waiting for <span class="em">'+escapeHtml(v.names[v.you^1])+'</span> to play\u2026';
+  if((mode==='host'||mode==='join'||mode==='bot')&&!v.yourTurn) return (mode==='bot'?'<span class="em">Computer</span> is thinking\u2026':'Waiting for <span class="em">'+escapeHtml(v.names[v.you^1])+'</span> to play\u2026');
   if(v.phase==='discard') return mode==='local'? '<span class="em">'+escapeHtml(v.names[v.turn])+'</span>, throw a card or a set \u2014 or declare.' : 'Your move \u2014 throw a card or a set, or declare.';
   if(v.phase==='draw') return 'Now take a card: the deck, or one card from the pile.';
   return escapeHtml(v.lastAction||'');
@@ -916,7 +1232,7 @@ function renderActions(v){
   var bar=$('actionBar'), hint=$('hintLine'); bar.innerHTML=''; hint.textContent='';
   var myTurn=v.yourTurn;
   if(v.phase==='roundover'||v.phase==='gameover') return;
-  if(mode!=='local'&&!myTurn){ hint.textContent='Sit tight \u2014 it\u2019s their turn.'; return; }
+  if((mode==='host'||mode==='join'||mode==='bot')&&!myTurn){ hint.textContent=(mode==='bot'?'Computer is thinking\u2026':'Sit tight \u2014 it\u2019s their turn.'); return; }
   var chosen=v.yourHand.filter(function(c){return selected.has(c.id);});
   var sameRank=chosen.length>=1 && chosen.every(function(c){return c.rank===chosen[0].rank;});
   var isSeven = sameRank && chosen[0].rank==='7';
@@ -1016,7 +1332,7 @@ function resultModal(v,rr,isOver){
       '<div class="score"><div class="nm">'+escapeHtml(names[me])+'</div><div class="pt">'+v.scores[me]+'</div></div>'+
       '<div class="score"><div class="nm">'+escapeHtml(names[opp])+'</div><div class="pt">'+v.scores[opp]+'</div></div></div>';
   if(isOver){
-    var w=v.winner; var lead = w===me&&mode!=='local' ? 'You win! \uD83C\uDF89' : escapeHtml(names[w])+' wins! \uD83C\uDF89';
+    var w=v.winner; var lead = w===me&&(mode!=='local'&&mode!=='bot') ? 'You win! \uD83C\uDF89' : (mode==='bot' && w===me ? 'You beat the Computer! \uD83C\uDF89' : (mode==='bot' && w!==me ? 'Computer wins! \uD83E\uDD16' : escapeHtml(names[w])+' wins! \uD83C\uDF89'));
     return '<div class="overlay"><div class="modal center">'+
       '<h2>'+lead+'</h2>'+
       '<div class="res-sub">'+escapeHtml(names[w])+' stayed under '+v.target+'.</div>'+
@@ -1111,6 +1427,7 @@ document.addEventListener('visibilitychange', function(){ if(document.visibility
   var div=document.createElement('div'); div.className='panel'; div.style.borderColor='var(--gold-dim)'; div.style.marginTop='14px';
   var label;
   if(s.mode==='local') label = 'You have a saved practice game';
+  else if(s.mode==='bot') label = 'You have a saved game vs <b class="gold">Computer ('+botLabelFor(s.botDifficulty||'smart')+')</b>';
   else if(s.mode==='host') label = 'You\u2019re hosting a saved game \u00b7 code <b style="color:var(--gold)">'+escapeHtml(s.code)+'</b>';
   else label = 'Rejoin your saved game \u00b7 code <b style="color:var(--gold)">'+escapeHtml(s.code)+'</b>';
   div.innerHTML='<div class="row" style="justify-content:space-between; align-items:center;">'+
@@ -1120,6 +1437,7 @@ document.addEventListener('visibilitychange', function(){ if(document.visibility
   $('btnResume').addEventListener('click',function(){
     if(s.mode==='host'){ resumeHost(s); }
     else if(s.mode==='local'){ resumeLocal(s); }
+    else if(s.mode==='bot'){ resumeBot(s); }
     else { myName = (s.names && s.names[0]) || myName; target = s.target||target; startJoin(s.code); }
   });
   $('btnDiscard').addEventListener('click',function(){ clearSession(); div.parentNode.removeChild(div); });
