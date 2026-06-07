@@ -289,6 +289,12 @@ class Game{
       this.pendingPenalty=WAR_PER_CARD;
       this.phase='war';
       this.lastAction='Round '+this.round+' \u00b7 wild rank is '+this.wildLabel()+' \u00b7 open pile is a 7 \u2014 '+this.names[starter]+' must counter with a 7 or pick up '+this.pendingPenalty+'.';
+    } else if(this.floor[0].rank===SKIP_RANK){
+      /* Open Jack: skip the natural starter, opponent plays first. */
+      this.pendingPenalty=0;
+      this.phase='discard';
+      this.turn=starter^1;
+      this.lastAction='Round '+this.round+' \u00b7 wild rank is '+this.wildLabel()+' \u00b7 open pile is a Jack \u2014 '+this.names[starter]+' is skipped, '+this.names[starter^1]+' starts.';
     } else {
       this.pendingPenalty=0;
       this.phase='discard';
@@ -445,7 +451,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v12';
+var BUILD='v13';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
