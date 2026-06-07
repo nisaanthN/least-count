@@ -405,10 +405,10 @@ class Game{
   _reshuffle(){ if(this.graveyard.length===0)return; this.deck=shuffle(this.graveyard); this.graveyard=[]; }
   _resolveShow(declarer){
     const t=[this.handPoints(this.hands[0]),this.handPoints(this.hands[1])];
-    const o=declarer^1; const correct=t[declarer]<t[o]; const d=[0,0];
+    const o=declarer^1; const correct=t[declarer]<=t[o]; const d=[0,0];
     var cap=this.penalty;
     if(correct){ d[declarer]=0; d[o]=Math.min(t[o],cap); }
-    else{ d[declarer]=cap; d[o]=t[o]<=t[declarer]?0:Math.min(t[o],cap); }
+    else{ d[declarer]=cap; d[o]=0; }
     this.scores[0]+=d[0]; this.scores[1]+=d[1];
     this.roundResult={declarer:declarer,totals:t,correct:correct,deltas:d};
     this.reveal=true; this.phase='roundover';
@@ -445,7 +445,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v10';
+var BUILD='v11';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
@@ -929,8 +929,14 @@ function resultModal(v,rr,isOver){
   }
   var header, sub;
   if(rr){
-    if(rr.correct){ header=escapeHtml(names[rr.declarer])+' wins the round!'; sub='Lowest hand ('+rr.totals[rr.declarer]+'). A correct show scores 0; the other side adds their count (capped at '+v.penalty+').'; }
-    else{ header='Wrong show!'; sub=escapeHtml(names[rr.declarer])+' declared with '+rr.totals[rr.declarer]+' but wasn\u2019t lowest \u2014 that\u2019s a +'+v.penalty+' penalty.'; }
+    if(rr.correct){
+      var tied = rr.totals[0]===rr.totals[1];
+      header=escapeHtml(names[rr.declarer])+' wins the round!';
+      sub=tied
+        ? 'Tied at '+rr.totals[rr.declarer]+' \u2014 ties go to the declarer. Declarer scores 0; the other side adds their count (capped at '+v.penalty+').'
+        : 'Lowest hand ('+rr.totals[rr.declarer]+'). A correct show scores 0; the other side adds their count (capped at '+v.penalty+').';
+    }
+    else{ header='Wrong show!'; sub=escapeHtml(names[rr.declarer])+' declared with '+rr.totals[rr.declarer]+' but was beaten \u2014 that\u2019s a +'+v.penalty+' penalty.'; }
   }else{ header='Round over'; sub=''; }
   return '<div class="overlay"><div class="modal center">'+
     '<h2>'+header+'</h2><div class="res-sub">'+sub+'</div>'+
@@ -955,8 +961,8 @@ function showRules(){
       '<li>\u26a1 <b>Jacks are skip cards.</b> Throwing one Jack skips your partner\u2019s next turn \u2014 so it comes <b>back to you</b>. Each extra Jack skips one more turn: <b>2 Jacks</b> \u2192 back to your partner, <b>3</b> \u2192 back to you, <b>4</b> \u2192 your partner, and so on. (In short: an odd number of Jacks means you play again; an even number passes the turn over.)</li>'+
       '<li>\uD83D\uDD25 <b>Sevens are penalty cards.</b> Throw a <b>7</b> and your partner owes <b>+2 cards</b>. Two 7s = <b>+4</b>, three = <b>+6</b>, etc. On their turn they <b>must throw a card</b>: a 7 <b>counters</b> (penalty grows +2 and bounces back); anything else means they throw that card AND pick the full pending total from the deck (their turn ends).</li>'+
       '<li><b>Declare</b> only when your hand totals <b>5 or less</b>, before throwing. All cards are revealed.</li>'+
-      '<li><b>Correct show</b> (you\u2019re strictly lowest): you score <b>0</b>; your partner adds their count.</li>'+
-      '<li><b>Wrong show</b> (they tied or beat you): you take a <b>+40</b> penalty; they score 0. The opponent\u2019s added count is also <b>capped at 40</b>, so even huge hands max out at 40.</li>'+
+      '<li><b>Correct show</b> (your count is <b>lower than or equal to</b> your partner\u2019s): you score <b>0</b>; your partner adds their count (capped at <b>40</b>). <i>Ties go to the declarer.</i></li>'+
+      '<li><b>Wrong show</b> (they strictly beat you): you take a <b>+40</b> penalty; they score 0.</li>'+
       '<li>Two full decks (106 cards) are in play. The deck reshuffles from discards when it runs out.</li>'+
       '<li>Drag your hand cards left or right to <b>reorder</b> them however you like.</li>'+
       '<li>The first player to reach the target score is knocked out \u2014 the other wins.</li>'+
