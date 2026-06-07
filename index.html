@@ -414,13 +414,26 @@ class Game{
   }
   _autoWinIfEmpty(){
     if(this.phase==='roundover'||this.phase==='gameover')return;
-    if(this.hands[this.turn].length===0){
-      this.pendingPenalty=0; this.pendingSevens=0; this.pendingJacks=0; this.warStarter=null; this.pendingDiscard=null;
-      var p=this.turn;
-      this._resolveShow(p);
-      this.lastAction=this.names[p]+' ran out of cards \u2014 auto-win!';
-      if(this.scores[0]>=this.target||this.scores[1]>=this.target){ this.winner=this.scores[0]<this.scores[1]?0:1; this.phase='gameover'; }
+    if(this.hands[this.turn].length!==0) return;
+    var p=this.turn;
+    /* If a 7-war landed on the empty-handed player, auto-pick the penalty and continue. */
+    if(this.phase==='war' && this.pendingPenalty>0){
+      var picked=0;
+      for(var i=0;i<this.pendingPenalty;i++){
+        if(this.deck.length===0)this._reshuffle();
+        if(this.deck.length===0)break;
+        this.hands[p].push(this.deck.pop()); picked++;
+      }
+      this.pendingPenalty=0; this.warStarter=null; this.pendingSevens=0;
+      this.phase='discard'; this.turn=p^1;
+      this.lastAction=this.names[p]+' had no cards \u2014 auto-picked '+picked+' from the 7\u2011penalty. '+this.names[p^1]+' plays.';
+      return;
     }
+    /* Otherwise, the empty-handed player auto-wins the round. */
+    this.pendingPenalty=0; this.pendingSevens=0; this.pendingJacks=0; this.warStarter=null; this.pendingDiscard=null;
+    this._resolveShow(p);
+    this.lastAction=this.names[p]+' ran out of cards \u2014 auto-win!';
+    if(this.scores[0]>=this.target||this.scores[1]>=this.target){ this.winner=this.scores[0]<this.scores[1]?0:1; this.phase='gameover'; }
   }
   _reshuffle(){ if(this.graveyard.length===0)return; this.deck=shuffle(this.graveyard); this.graveyard=[]; }
   _resolveShow(declarer){
@@ -465,7 +478,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v16';
+var BUILD='v17';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
