@@ -256,7 +256,13 @@ class Game{
     this.round+=1; const deck=shuffle(makeDeck());
     this.hands=[[],[]];
     for(let i=0;i<7;i++){ this.hands[0].push(deck.pop()); this.hands[1].push(deck.pop()); }
+    /* wild indicator can't be a 7 or Jack (those are power/penalty cards) \u2014 push them to the bottom and redraw */
+    var skipped=[];
     this.wildIndicator=deck.pop();
+    while(this.wildIndicator && (this.wildIndicator.rank===WAR_RANK || this.wildIndicator.rank===SKIP_RANK)){
+      skipped.push(this.wildIndicator); this.wildIndicator=deck.pop();
+    }
+    for(var si=0;si<skipped.length;si++) deck.unshift(skipped[si]);
     this.wildRank=this.wildIndicator.rank==='JOKER'?'A':this.wildIndicator.rank;
     this.floor=[deck.pop()]; this.deck=deck; this.graveyard=[];
     this.pendingDiscard=null; this.pendingJacks=0; this.pendingPenalty=0; this.warStarter=null;
@@ -331,7 +337,10 @@ class Game{
     }else if(source==='floor'){
       const i=this.floor.findIndex(c=>c.id===cardId);
       if(i===-1)throw new Error("That card isn't on the pile.");
-      const c=this.floor.splice(i,1)[0]; this.hands[p].push(c);
+      const c=this.floor[i];
+      if(c.rank===WAR_RANK)throw new Error("You can\u2019t pick a 7 off the pile.");
+      if(c.rank===SKIP_RANK)throw new Error("You can\u2019t pick a Jack off the pile.");
+      this.floor.splice(i,1); this.hands[p].push(c);
       this.lastAction=this.names[p]+' took '+labelCard(c)+' from the pile.';
     }else throw new Error("bad source");
     this._finishTurn();
@@ -625,8 +634,11 @@ function render(){
   if(v.floor.length===0){ var e2=document.createElement('div'); e2.className='empty-slot'; e2.textContent='\u2014'; fc.appendChild(e2); }
   v.floor.forEach(function(c){
     var opts={zero:c.pts===0};
-    if(canDraw){ opts.pickable=true; opts.onClick=function(){submit({t:'draw',source:'floor',cardId:c.id});}; }
-    fc.appendChild(cardEl(c,opts));
+    var locked = (c.rank==='7'||c.rank==='J');
+    if(canDraw && !locked){ opts.pickable=true; opts.onClick=function(){submit({t:'draw',source:'floor',cardId:c.id});}; }
+    var el=cardEl(c,opts);
+    if(canDraw && locked){ el.style.opacity='.55'; el.title=(c.rank==='7'?'7':'Jack')+'s can\u2019t be picked from the pile'; }
+    fc.appendChild(el);
   });
   floorCol.appendChild(fl); floorCol.appendChild(fc); tz.appendChild(floorCol);
 
@@ -789,9 +801,9 @@ function showRules(){
     '<div class="res-sub">Two players. Lowest hand wins each round; the first to reach the target score is knocked out and the other wins.</div>'+
     '<ul class="rules-list">'+
       '<li>You\u2019re each dealt <b>7 cards</b>. Points: <b>A = 1</b>, 2\u201310 = face value, <b>J / Q / K = 10</b>, Joker = 0.</li>'+
-      '<li>Each round one card is flipped as the <b>wild rank</b> \u2014 every card of that rank counts as <b>0</b> for the round (if the Joker is flipped, Aces become wild).</li>'+
+      '<li>Each round one card is flipped as the <b>wild rank</b> \u2014 every card of that rank counts as <b>0</b> for the round (if the Joker is flipped, Aces become wild). <b>7s and Jacks can never be wild</b> \u2014 they\u2019re power cards.</li>'+
       '<li>On your turn you either play, or <b>declare</b>.</li>'+
-      '<li>To play: <b>(1) throw</b> one card, or several of the <b>same rank</b> at once (this is how you dump points fast). <b>(2) draw</b> one \u2014 from the deck, or take a single card from the pile your partner just threw. If what you threw matches the pile\u2019s rank, you may <b>skip the draw</b>.</li>'+
+      '<li>To play: <b>(1) throw</b> one card, or several of the <b>same rank</b> at once (this is how you dump points fast). <b>(2) draw</b> one \u2014 from the deck, or take a single card from the pile your partner just threw (<b>7s and Jacks</b> can\u2019t be picked from the pile). If what you threw matches the pile\u2019s rank, you may <b>skip the draw</b>.</li>'+
       '<li>\uD83E\uDD41 <b>Throwing 3 or more cards</b> at once lets you <b>skip the draw</b> for that turn \u2014 a fast way to shed weight.</li>'+
       '<li>\u26a1 <b>Jacks are skip cards.</b> Throwing one Jack skips your partner\u2019s next turn \u2014 so it comes <b>back to you</b>. Each extra Jack skips one more turn: <b>2 Jacks</b> \u2192 back to your partner, <b>3</b> \u2192 back to you, <b>4</b> \u2192 your partner, and so on. (In short: an odd number of Jacks means you play again; an even number passes the turn over.)</li>'+
       '<li>\uD83D\uDD25 <b>Sevens are penalty cards.</b> Throw a <b>7</b> and your partner must <b>pick up 2 cards</b>. Throw two 7s and they pick <b>4</b>. They can <b>counter with their own 7(s)</b> instead of picking \u2014 the penalty stacks (+2 per 7) and bounces back to you. Whoever can\u2019t (or won\u2019t) counter picks up the full total; their turn ends and the other plays.</li>'+
