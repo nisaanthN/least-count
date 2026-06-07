@@ -661,21 +661,10 @@ function botRollout(baseData, p, action, count){
 }
 function botHard(g, p, opts){
   var view=g.viewFor(p);
-  opts=opts||{}; var perMove=opts.rollouts||60;
+  opts=opts||{}; var perMove=opts.rollouts||80;
   if(view.phase==='war'){
-    /* War decisions are usually clear; defer to Smart but compare counter vs throw via rollouts. */
-    var hand=g.hands[p];
-    var sevens=hand.filter(function(c){return c.rank==='7';});
-    var baseData=g.toData();
-    var cands=[];
-    if(sevens.length) cands.push({t:'discard', cardIds: sevens.map(function(c){return c.id;})});
-    /* Each non-7 throw option */
-    botGenerateThrows(hand).forEach(function(m){
-      if(m[0].rank==='7') return;
-      cands.push({t:'discard', cardIds: m.map(function(c){return c.id;})});
-    });
-    if(cands.length===0) return botSmartWar(g, p);
-    return botPickBest(cands, baseData, p, perMove);
+    /* War decisions are clear-cut: if you have a 7, counter. Rollouts add noise here. */
+    return botSmart(g, p);
   }
   if(view.phase==='discard'){
     var pts=g.handPoints(g.hands[p]);
@@ -713,10 +702,10 @@ function botMove(g, p, difficulty){
   try{
     if(difficulty==='easy') return botEasy(g, p);
     if(difficulty==='hard'){
-      /* Budget: aim for ~300+ rollouts total. */
+      /* Budget: ~600 rollouts total, min 80 per candidate. */
       var view=g.viewFor(p);
       var moveCount=view.phase==='draw' ? (1 + view.floor.filter(function(c){return c.rank!=='7'&&c.rank!=='J';}).length) : botGenerateThrows(g.hands[p]).length + (g.handPoints(g.hands[p])<=5?1:0);
-      var perMove=Math.max(40, Math.ceil(400/Math.max(1,moveCount)));
+      var perMove=Math.max(80, Math.ceil(600/Math.max(1,moveCount)));
       return botHard(g, p, {rollouts:perMove});
     }
     return botSmart(g, p);
@@ -730,7 +719,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v19';
+var BUILD='v20';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
