@@ -77,6 +77,11 @@ test_src = test_src.replace(
     'from engine import Game, make_deck, RANKS, SUITS, DECLARE_MAX, WAR_RANK, SKIP_RANK, WAR_PER_CARD',
     '# engine symbols already in scope'
 )
+# Strip the sys.exit lines — in a notebook, SystemExit displays as a (misleading) traceback.
+test_src = test_src.replace(
+    'import sys\nsys.exit(0 if fail_n == 0 else 1)',
+    "assert fail_n == 0, f'{fail_n} test(s) failed — stop and fix before training'"
+)
 cells.append(code_cell(test_src))
 
 # Cell 4: Smart bot
