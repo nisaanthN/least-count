@@ -156,8 +156,11 @@
   .reveal-row{display:flex; justify-content:space-between; align-items:center; gap:10px; padding:11px 14px; border-radius:12px; background:rgba(0,0,0,.22); margin-bottom:9px;}
   .reveal-row .who{font-weight:700;}
   .reveal-row .cards{display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;}
-  .mini{width:30px; aspect-ratio:5/7; border-radius:5px;}
-  .mini .corner{font-size:9px;} .mini .corner .s{font-size:8px;} .mini .pip{font-size:13px;} .mini .jk{font-size:12px;} .mini .jk small{display:none;}
+  .mini{width:30px; aspect-ratio:5/7; border-radius:5px; display:flex; align-items:center; justify-content:center; font-family:var(--display); font-weight:700;}
+  .mini .mface{display:flex; flex-direction:column; align-items:center; line-height:1; gap:1px;}
+  .mini .mface .mr{font-size:12px;}
+  .mini .mface .ms{font-size:10px;}
+  .mini .jk{font-size:14px;}
   .delta{font-family:var(--display); font-weight:700; font-size:20px; white-space:nowrap;}
   .delta.good{color:#8fe3a9;} .delta.bad{color:var(--rose);}
   .modal .foot{display:flex; gap:10px; justify-content:center; margin-top:16px; flex-wrap:wrap;}
@@ -315,6 +318,7 @@ class Game{
     var isJack=chosen[0].rank===SKIP_RANK;
     if(this.phase==='war' && !isSeven){
       /* End the war: throw the card, then pick the penalty from the deck. */
+      var jacksThrown = isJack ? chosen.length : 0;
       this.hands[p]=hand.filter(c=>ids.indexOf(c.id)===-1);
       this.graveyard.push.apply(this.graveyard,this.floor);
       this.floor=chosen; this.pendingDiscard=null;
@@ -327,9 +331,14 @@ class Game{
       }
       if(this.hands[p].length===0){ if(this.deck.length===0)this._reshuffle(); if(this.deck.length)this.hands[p].push(this.deck.pop()); }
       this.pendingPenalty=0; this.warStarter=null;
-      this.phase='discard'; this.turn=p^1;
+      this.phase='discard';
+      /* Jacks thrown to end the war still apply their skip: odd = play again, even = pass. */
+      this.turn = p ^ ((jacksThrown + 1) % 2);
       this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' and picked up '+picked+' card'+(picked!==1?'s':'')+' from the 7\u2011penalty.';
-      return {warEnded:true, picked:picked};
+      if(jacksThrown>0){
+        this.lastAction += '  \u2014  '+jacksThrown+' Jack'+(jacksThrown>1?'s':'')+'! '+(this.turn===p ? this.names[p]+' plays again.' : this.names[this.turn]+'\u2019s turn.');
+      }
+      return {warEnded:true, picked:picked, jacksThrown:jacksThrown};
     }
     this.hands[p]=hand.filter(c=>ids.indexOf(c.id)===-1);
     this.pendingDiscard=chosen;
@@ -436,7 +445,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v9';
+var BUILD='v10';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
@@ -881,7 +890,7 @@ function miniHandHtml(hand){
   return hand.map(function(c){
     if(c.rank==='JOKER') return '<div class="card mini black"><div class="jk">\uD83C\uDCCF</div></div>';
     var red=(c.suit==='H'||c.suit==='D'); var sc=SUIT_CHAR[c.suit];
-    return '<div class="card mini '+(red?'red':'black')+'"><div class="corner tl">'+c.rank+'<span class="s">'+sc+'</span></div><div class="pip">'+sc+'</div></div>';
+    return '<div class="card mini '+(red?'red':'black')+'"><div class="mface"><span class="mr">'+c.rank+'</span><span class="ms">'+sc+'</span></div></div>';
   }).join('');
 }
 function resultModal(v,rr,isOver){
@@ -890,11 +899,20 @@ function resultModal(v,rr,isOver){
   var rowsHtml='';
   [me,opp].forEach(function(idx){
     var isDeclarer=rr&&rr.declarer===idx; var delta=rr?rr.deltas[idx]:0; var good=delta===0;
+    var total = rr ? rr.totals[idx] : 0;
     rowsHtml+='<div class="reveal-row"><div>'+
-      '<div class="who">'+escapeHtml(names[idx])+(idx===me&&mode!=='local'?' (you)':'')+' '+(isDeclarer?'<span class="gold">\u00b7 declared</span>':'')+'</div>'+
+      '<div class="who">'+escapeHtml(names[idx])+(idx===me&&mode!=='local'?' (you)':'')+(isDeclarer?' <span class="gold">\u00b7 declared</span>':'')+'</div>'+
+      '<div class="tiny" style="color:var(--muted); margin:2px 0 5px;">total: <b class="gold">'+total+'</b> pt'+(total===1?'':'s')+'</div>'+
       '<div class="cards">'+miniHandHtml(hands[idx])+'</div></div>'+
       '<div class="delta '+(good?'good':'bad')+'">+'+delta+'</div></div>';
   });
+  var wildSc = v.wildIndicator && v.wildIndicator.suit ? SUIT_CHAR[v.wildIndicator.suit] : '';
+  var wildRed = v.wildIndicator && (v.wildIndicator.suit==='H'||v.wildIndicator.suit==='D');
+  var wildLine = '<div class="row" style="justify-content:center; align-items:center; gap:10px; margin:10px 0 14px;">'+
+    '<span class="tiny" style="color:var(--muted);">Wild rank this round</span>'+
+    '<div class="card mini '+(wildRed?'red':'black')+'"><div class="mface"><span class="mr">'+v.wildRank+'</span>'+(wildSc?'<span class="ms">'+wildSc+'</span>':'')+'</div></div>'+
+    '<span class="tiny" style="color:var(--muted);">= 0</span>'+
+  '</div>';
   var scoreLine='<div class="row" style="justify-content:center; gap:18px; margin-top:8px;">'+
       '<div class="score"><div class="nm">'+escapeHtml(names[me])+'</div><div class="pt">'+v.scores[me]+'</div></div>'+
       '<div class="score"><div class="nm">'+escapeHtml(names[opp])+'</div><div class="pt">'+v.scores[opp]+'</div></div></div>';
@@ -903,6 +921,7 @@ function resultModal(v,rr,isOver){
     return '<div class="overlay"><div class="modal center">'+
       '<h2>'+lead+'</h2>'+
       '<div class="res-sub">'+escapeHtml(names[w])+' stayed under '+v.target+'.</div>'+
+      wildLine+
       '<div class="winner-name" style="margin:6px 0 2px;">Final score</div>'+scoreLine+
       '<div style="margin-top:14px; text-align:left;">'+rowsHtml+'</div>'+
       '<div class="foot"><button class="btn btn-primary" id="ovAgain">Play again</button></div>'+
@@ -910,11 +929,12 @@ function resultModal(v,rr,isOver){
   }
   var header, sub;
   if(rr){
-    if(rr.correct){ header=escapeHtml(names[rr.declarer])+' wins the round!'; sub='Lowest hand ('+rr.totals[rr.declarer]+'). A correct show scores 0; the other side adds their count.'; }
+    if(rr.correct){ header=escapeHtml(names[rr.declarer])+' wins the round!'; sub='Lowest hand ('+rr.totals[rr.declarer]+'). A correct show scores 0; the other side adds their count (capped at '+v.penalty+').'; }
     else{ header='Wrong show!'; sub=escapeHtml(names[rr.declarer])+' declared with '+rr.totals[rr.declarer]+' but wasn\u2019t lowest \u2014 that\u2019s a +'+v.penalty+' penalty.'; }
   }else{ header='Round over'; sub=''; }
   return '<div class="overlay"><div class="modal center">'+
     '<h2>'+header+'</h2><div class="res-sub">'+sub+'</div>'+
+    wildLine+
     '<div style="text-align:left;">'+rowsHtml+'</div>'+scoreLine+
     '<div class="foot"><button class="btn btn-primary" id="ovNext">Deal next round</button></div>'+
     '</div></div>';
