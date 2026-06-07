@@ -131,6 +131,12 @@
   .deck-stack{position:relative; width:calc(clamp(48px,13.5vw,72px) + 18px); height:calc((clamp(48px,13.5vw,72px)) * 1.4 + 14px);}
   .deck-stack .wild-under{position:absolute; left:18px; top:14px; transform:rotate(8deg); z-index:0; box-shadow:0 2px 6px rgba(0,0,0,.4);}
   .deck-stack .deck-top{position:absolute; left:0; top:0; z-index:2;}
+  .thrown-col .tlabel{color:var(--gold);}
+  .thrown-col .floor-cards{filter:drop-shadow(0 6px 12px rgba(232,196,104,.25));}
+  @keyframes thrownIn{from{transform:translateY(-34px) scale(.85) rotate(-8deg); opacity:0;} to{transform:translateY(0) scale(1) rotate(0); opacity:1;}}
+  .thrown-card{animation:thrownIn .32s cubic-bezier(.2,.85,.3,1.05) backwards;}
+  @keyframes floorLand{from{transform:translateY(-22px) scale(1.08); opacity:.5;} to{transform:translateY(0) scale(1); opacity:1;}}
+  .floor-fresh{animation:floorLand .3s cubic-bezier(.25,.85,.35,1.02) backwards;}
   .deal .card{animation:dealin .4s cubic-bezier(.2,.8,.25,1) backwards;}
   @keyframes dealin{from{opacity:0; transform:translateY(26px) scale(.9) rotate(-6deg);}}
 
@@ -265,7 +271,7 @@ class Game{
     for(var si=0;si<skipped.length;si++) deck.unshift(skipped[si]);
     this.wildRank=this.wildIndicator.rank==='JOKER'?'A':this.wildIndicator.rank;
     this.floor=[deck.pop()]; this.deck=deck; this.graveyard=[];
-    this.pendingDiscard=null; this.pendingJacks=0; this.pendingPenalty=0; this.warStarter=null;
+    this.pendingDiscard=null; this.pendingJacks=0; this.pendingSevens=0; this.pendingPenalty=0; this.warStarter=null;
     this.turn=starter; this.starter=starter;
     this.phase='discard'; this.skipEligible=false; this.reveal=false; this.roundResult=null;
     this.lastAction='Round '+this.round+' \u00b7 wild rank is '+this.wildLabel()+' (those cards = 0) \u00b7 '+this.names[starter]+' starts.';
@@ -290,30 +296,22 @@ class Game{
     if(chosen.length!==ids.length)throw new Error("Card not in hand.");
     if(!this.isValidSet(chosen))throw new Error("You can only throw cards of the same rank together.");
     var isSeven=chosen[0].rank===WAR_RANK;
+    var isJack=chosen[0].rank===SKIP_RANK;
     if(this.phase==='war'&&!isSeven)throw new Error("You\u2019re under a 7\u2011penalty \u2014 counter with a 7 or pick up "+this.pendingPenalty+".");
     this.hands[p]=hand.filter(c=>ids.indexOf(c.id)===-1);
-    if(isSeven){
-      if(this.phase!=='war') this.warStarter=p;
-      this.pendingPenalty += WAR_PER_CARD*chosen.length;
-      this.graveyard.push.apply(this.graveyard,this.floor);
-      this.floor=chosen; this.pendingDiscard=null;
-      this.skipEligible=false; this.pendingJacks=0;
-      if(this.hands[p].length===0){ if(this.deck.length===0)this._reshuffle(); if(this.deck.length)this.hands[p].push(this.deck.pop()); }
-      this.turn=p^1; this.phase='war';
-      this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' \u2014 '+this.names[p^1]+' must counter with a 7 or pick up '+this.pendingPenalty+' card'+(this.pendingPenalty>1?'s':'')+'.';
-      return {war:true, pendingPenalty:this.pendingPenalty};
-    }
     this.pendingDiscard=chosen;
-    this.pendingJacks = chosen[0].rank===SKIP_RANK ? chosen.length : 0;
-    this.skipEligible=this.floorRank()!==null&&chosen[0].rank===this.floorRank();
+    this.pendingJacks  = isJack  ? chosen.length : 0;
+    this.pendingSevens = isSeven ? chosen.length : 0;
+    /* 7s and Jacks never let you skip the draw via pile-match */
+    this.skipEligible = !isSeven && !isJack && this.floorRank()!==null && chosen[0].rank===this.floorRank();
     if(chosen.length>=BULK_NO_DRAW){
       this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' \u2014 '+chosen.length+'\u2011card set, no draw.';
       this._finishTurn();
-      return {skippedDraw:true};
+      return {skippedDraw:true, war:this.phase==='war'};
     }
     this.phase='draw';
     this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+'.';
-    return {skipEligible:this.skipEligible};
+    return {skipEligible:this.skipEligible, pendingSevens:this.pendingSevens};
   }
   pickPenalty(p){
     if(this.phase!=='war'||this.turn!==p)throw new Error("No penalty to pick up.");
@@ -357,6 +355,16 @@ class Game{
     this.floor=this.pendingDiscard; this.pendingDiscard=null; this.skipEligible=false;
     var thrower=this.turn;
     if(this.hands[thrower].length===0){ if(this.deck.length===0)this._reshuffle(); if(this.deck.length)this.hands[thrower].push(this.deck.pop()); }
+    var sevens=this.pendingSevens||0; this.pendingSevens=0;
+    if(sevens>0){
+      if(this.warStarter==null) this.warStarter=thrower;
+      this.pendingPenalty += WAR_PER_CARD*sevens;
+      this.pendingJacks=0;
+      this.turn = thrower^1;
+      this.phase='war';
+      this.lastAction += '  \u2014  '+this.names[thrower^1]+' must counter with a 7 or pick up '+this.pendingPenalty+' card'+(this.pendingPenalty>1?'s':'')+'.';
+      return;
+    }
     var j=this.pendingJacks||0; this.pendingJacks=0;
     this.turn = thrower ^ ((j+1)%2);
     this.phase='discard';
@@ -386,21 +394,24 @@ class Game{
       oppHand:this.reveal?this.hands[opp].map(c=>({id:c.id,rank:c.rank,suit:c.suit,pts:this.cardPoints(c)})):null,
       oppPoints:this.reveal?this.handPoints(this.hands[opp]):null,
       floor:this.floor.map(c=>({id:c.id,rank:c.rank,suit:c.suit,pts:this.cardPoints(c)})),
+      pendingDiscard:this.pendingDiscard?this.pendingDiscard.map(c=>({id:c.id,rank:c.rank,suit:c.suit,pts:this.cardPoints(c)})):null,
+      pendingThrower:this.pendingDiscard?this.turn:null,
       deckCount:this.deck.length, wildRank:this.wildRank, wildIndicator:this.wildIndicator,
       turn:this.turn, yourTurn:this.turn===p, phase:this.phase, skipEligible:this.skipEligible,
-      pendingPenalty:this.pendingPenalty||0,
+      pendingPenalty:this.pendingPenalty||0, pendingSevens:this.pendingSevens||0,
       canDeclare:this.canDeclare(p), reveal:this.reveal, roundResult:this.roundResult,
       winner:this.winner, lastAction:this.lastAction, declareMax:DECLARE_MAX
     };
   }
 }
-Game.prototype.toData=function(){ var k=['target','penalty','names','scores','round','winner','phase','hands','wildIndicator','wildRank','floor','deck','graveyard','pendingDiscard','pendingJacks','pendingPenalty','warStarter','turn','starter','skipEligible','reveal','roundResult','lastAction']; var d={}; for(var i=0;i<k.length;i++)d[k[i]]=this[k[i]]; return d; };
-Game.fromData=function(d){ var g=Object.create(Game.prototype); for(var key in d)g[key]=d[key]; if(g.pendingJacks===undefined)g.pendingJacks=0; if(g.pendingPenalty===undefined)g.pendingPenalty=0; if(g.warStarter===undefined)g.warStarter=null; return g; };
+Game.prototype.toData=function(){ var k=['target','penalty','names','scores','round','winner','phase','hands','wildIndicator','wildRank','floor','deck','graveyard','pendingDiscard','pendingJacks','pendingSevens','pendingPenalty','warStarter','turn','starter','skipEligible','reveal','roundResult','lastAction']; var d={}; for(var i=0;i<k.length;i++)d[k[i]]=this[k[i]]; return d; };
+Game.fromData=function(d){ var g=Object.create(Game.prototype); for(var key in d)g[key]=d[key]; if(g.pendingJacks===undefined)g.pendingJacks=0; if(g.pendingSevens===undefined)g.pendingSevens=0; if(g.pendingPenalty===undefined)g.pendingPenalty=0; if(g.warStarter===undefined)g.warStarter=null; return g; };
 function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+SUIT_CHAR[c.suit]; }
 
 /* ===== APP STATE ===== */
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
+var lastFloorIds='';
 var myName='You', oppName='Partner', target=100, roomCode='';
 var selected=new Set();
 var lastRound=-1, overlayKey='';
@@ -631,6 +642,7 @@ function render(){
   var floorCol=document.createElement('div'); floorCol.className='tcol';
   var fl=document.createElement('div'); fl.className='tlabel'; fl.textContent=canDraw?'Pile \u2014 tap one to take':'Open pile';
   var fc=document.createElement('div'); fc.className='floor-cards';
+  var floorIds=v.floor.map(function(c){return c.id;}).join(','); var floorChanged=(floorIds!==lastFloorIds); lastFloorIds=floorIds;
   if(v.floor.length===0){ var e2=document.createElement('div'); e2.className='empty-slot'; e2.textContent='\u2014'; fc.appendChild(e2); }
   v.floor.forEach(function(c){
     var opts={zero:c.pts===0};
@@ -638,9 +650,22 @@ function render(){
     if(canDraw && !locked){ opts.pickable=true; opts.onClick=function(){submit({t:'draw',source:'floor',cardId:c.id});}; }
     var el=cardEl(c,opts);
     if(canDraw && locked){ el.style.opacity='.55'; el.title=(c.rank==='7'?'7':'Jack')+'s can\u2019t be picked from the pile'; }
+    if(floorChanged) el.classList.add('floor-fresh');
     fc.appendChild(el);
   });
   floorCol.appendChild(fl); floorCol.appendChild(fc); tz.appendChild(floorCol);
+
+  if(v.pendingDiscard && v.pendingDiscard.length){
+    var thrownCol=document.createElement('div'); thrownCol.className='tcol thrown-col';
+    var tl=document.createElement('div'); tl.className='tlabel'; tl.textContent='Just thrown';
+    var tc=document.createElement('div'); tc.className='floor-cards';
+    v.pendingDiscard.forEach(function(c,i){
+      var el=cardEl(c,{zero:c.pts===0}); el.classList.add('thrown-card');
+      el.style.animationDelay=(i*60)+'ms';
+      tc.appendChild(el);
+    });
+    thrownCol.appendChild(tl); thrownCol.appendChild(tc); tz.appendChild(thrownCol);
+  }
 
   $('statusLine').innerHTML=statusText(v);
 
