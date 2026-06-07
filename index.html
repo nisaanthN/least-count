@@ -609,7 +609,52 @@ function botSmart(g, p){
   return {t:'draw', source:'deck'};
 }
 
-/* ----- HARD: Monte Carlo rollouts with Smart as the rollout policy ----- */
+/* ----- SMART+ (used only as Hard's internal rollout policy; user-facing Smart bot is unchanged) ----- */
+function botSmartPlusScoreThrow(g, p, cards, view){
+  var base = botSmartScoreThrow(g, p, cards, view);
+  /* Pair preservation: penalize breaking an existing pair/set by throwing a singleton. */
+  if(cards.length === 1 && cards[0].rank !== '7'){
+    var rank = cards[0].rank;
+    var sameRank = 0;
+    for(var i=0;i<g.hands[p].length;i++){ if(g.hands[p][i].rank===rank) sameRank++; }
+    if(sameRank >= 2){
+      base -= (sameRank - 1) * 4;
+    }
+  }
+  /* Triple setup: pile rank matches a pair in hand, and I'm throwing a non-matching card.
+     Throwing this means I can draw the pile card to make a triple next turn. */
+  if(cards.length === 1 && view.floor.length > 0){
+    var pileRank = view.floor[0].rank;
+    if(pileRank !== '7' && pileRank !== 'J' && cards[0].rank !== pileRank){
+      var pileRankInHand = 0;
+      for(var i=0;i<g.hands[p].length;i++){ if(g.hands[p][i].rank===pileRank) pileRankInHand++; }
+      if(pileRankInHand >= 2){
+        var pileRankPts = pileRank === 'A' ? 1 : (pileRank === 'Q' || pileRank === 'K' || pileRank === 'J') ? 10 : (pileRank === 'JOKER' ? 0 : parseInt(pileRank, 10));
+        if(pileRank === g.wildRank) pileRankPts = 0;
+        base += 6 + pileRankPts * 0.4;
+      }
+    }
+  }
+  return base;
+}
+function botSmartPlus(g, p){
+  var view = g.viewFor(p);
+  if(view.phase === 'war') return botSmartWar(g, p);
+  if(view.phase === 'discard'){
+    if(botSmartShouldDeclare(g, p, view)) return {t:'declare'};
+    var moves = botGenerateThrows(g.hands[p]);
+    var best = null, bestS = -Infinity;
+    for(var i=0;i<moves.length;i++){
+      var s = botSmartPlusScoreThrow(g, p, moves[i], view);
+      if(s > bestS){ bestS = s; best = moves[i]; }
+    }
+    return {t:'discard', cardIds: best.map(function(c){return c.id;})};
+  }
+  if(view.phase === 'draw') return botSmartDraw(g, p, view);
+  return {t:'draw', source:'deck'};
+}
+
+/* ----- HARD: Monte Carlo rollouts with Smart+ for own future moves, Smart for opp ----- */
 function botSampleHidden(sim, botP){
   var opp=botP^1;
   var visible={};
@@ -639,7 +684,7 @@ function botRolloutOnce(baseData, p, action){
     var safety=80;
     while(sim.phase!=='roundover' && sim.phase!=='gameover' && safety-->0){
       var curP=sim.turn;
-      var a=botSmart(sim, curP);
+      var a = curP === p ? botSmartPlus(sim, curP) : botSmart(sim, curP);
       if(!a) break;
       botApplySimAction(sim, curP, a);
     }
@@ -677,7 +722,7 @@ function botEvaluateOnWorld(worldData, action, botP){
     var safety=80;
     while(sim.phase!=='roundover' && sim.phase!=='gameover' && safety-->0){
       var curP=sim.turn;
-      var a=botSmart(sim, curP);
+      var a = curP === botP ? botSmartPlus(sim, curP) : botSmart(sim, curP);
       if(!a) break;
       botApplySimAction(sim, curP, a);
     }
@@ -710,14 +755,14 @@ function botHard(g, p, opts){
     var scored=[];
     var moves=botGenerateThrows(g.hands[p]);
     moves.forEach(function(m){
-      var s=botSmartScoreThrow(g, p, m, view);
+      var s=botSmartPlusScoreThrow(g, p, m, view);
       scored.push({action:{t:'discard', cardIds: m.map(function(c){return c.id;})}, smartScore:s});
     });
     if(pts<=5){
       var dScore = botSmartShouldDeclare(g, p, view) ? 45 : -20;
       scored.push({action:{t:'declare'}, smartScore: dScore});
     }
-    if(scored.length===0) return botSmart(g, p);
+    if(scored.length===0) return botSmartPlus(g, p);
     scored.sort(function(a,b){return b.smartScore - a.smartScore;});
     /* 2) Decisive top pick (>= 40 ahead)? Skip rollouts. Otherwise always rollout. */
     if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 40){
@@ -780,7 +825,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v23';
+var BUILD='v24';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
