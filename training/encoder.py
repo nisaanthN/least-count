@@ -47,7 +47,7 @@ STATE_DIM = (
     14 + 1 +   # last_opp_throw_rank, last_opp_throw_count
     1 + 1 + 1   # my_num_pairs, my_num_triples, my_max_set_size
 )
-assert STATE_DIM == 102, f'STATE_DIM is {STATE_DIM}'
+assert STATE_DIM == 103, f'STATE_DIM is {STATE_DIM}'
 
 # Action space layout
 N_THROW_RANKS = 14
