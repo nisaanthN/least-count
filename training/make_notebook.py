@@ -150,6 +150,32 @@ wr = eval_vs_smart(net, device, num_games=30, target=50)
 print(f'BC win rate vs Smart at target=50: {wr*100:.0f}%')
 """))
 
+# Cell 9b: Resume from checkpoint
+cells.append(md_cell("""## (Optional) Resume from a saved checkpoint
+
+If Colab disconnected mid-training, run this cell instead of Cell 9 (BC) to pick up from the
+last checkpoint. Then continue with Cell 10."""))
+cells.append(code_cell("""\
+import os
+# Try latest checkpoint first, then best
+ckpt = None
+for path in ['/content/policy_latest.pt', '/content/policy_best.pt', '/content/policy_bc.pt']:
+    if os.path.exists(path):
+        ckpt = path
+        break
+
+if ckpt is None:
+    print('No checkpoint found. Run Cell 9 (BC) first.')
+else:
+    net = PolicyValueNet().to(device)
+    net.load_state_dict(torch.load(ckpt, map_location=device))
+    net.train()
+    print(f'Resumed from {ckpt}')
+    # Quick eval to confirm
+    wr = eval_vs_smart(net, device, num_games=20, target=50)
+    print(f'Current win rate vs Smart: {wr*100:.0f}%')
+"""))
+
 # Cell 10: PPO training
 cells.append(md_cell("""## Cell 10: PPO self-play with league (LONG — 4-10 hours)
 
