@@ -1,0 +1,16 @@
+{
+  "name": "least-count-broker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PeerJS signaling broker for the Least Count game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "peer": "^1.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

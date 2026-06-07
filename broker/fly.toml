@@ -1,0 +1,23 @@
+# Fly.io config for the Least Count PeerJS broker.
+# Deploy:  cd broker && fly launch --copy-config --no-deploy
+#          fly deploy
+app = "least-count-broker"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "9000"
+  PEER_PATH = "/lc"
+
+[http_service]
+  internal_port = 9000
+  force_https = true
+  auto_stop_machines = false      # always-on: signaling latency matters
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

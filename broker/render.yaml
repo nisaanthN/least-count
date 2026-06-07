@@ -1,0 +1,13 @@
+# Render blueprint (for the no-CC path).
+# In Render dashboard: New → Blueprint → connect repo → it reads this file.
+services:
+  - type: web
+    name: least-count-broker
+    runtime: node
+    plan: free
+    rootDir: broker
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PEER_PATH
+        value: /lc
