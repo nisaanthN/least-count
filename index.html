@@ -128,6 +128,9 @@
   .card.back{background:repeating-linear-gradient(45deg, rgba(0,0,0,.18) 0 5px, transparent 5px 10px), linear-gradient(150deg,#1c7a4e,#0c4b2f); border:1px solid rgba(255,255,255,.18);}
   .card.back::after{content:"✦"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--gold); opacity:.65; font-size:clamp(16px,5vw,22px);}
   .empty-slot{width:clamp(48px,13.5vw,72px); aspect-ratio:5/7; border-radius:9px; border:1.5px dashed rgba(255,255,255,.28); display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.4); font-size:11px; text-align:center;}
+  .deck-stack{position:relative; width:calc(clamp(48px,13.5vw,72px) + 18px); height:calc((clamp(48px,13.5vw,72px)) * 1.4 + 14px);}
+  .deck-stack .wild-under{position:absolute; left:18px; top:14px; transform:rotate(8deg); z-index:0; box-shadow:0 2px 6px rgba(0,0,0,.4);}
+  .deck-stack .deck-top{position:absolute; left:0; top:0; z-index:2;}
   .deal .card{animation:dealin .4s cubic-bezier(.2,.8,.25,1) backwards;}
   @keyframes dealin{from{opacity:0; transform:translateY(26px) scale(.9) rotate(-6deg);}}
 
@@ -238,6 +241,9 @@ function makeDeck(){ const c=[]; for(const s of SUITS)for(const r of RANKS)c.pus
 function shuffle(a){ for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));const t=a[i];a[i]=a[j];a[j]=t;} return a; }
 var DECLARE_MAX=5;     /* you can only declare with a hand of 5 or less */
 var SKIP_RANK='J';     /* Jacks skip the next turn(s) */
+var WAR_RANK='7';      /* Sevens force opponent to pick 2 cards each (stackable) */
+var WAR_PER_CARD=2;
+var BULK_NO_DRAW=3;    /* throwing this many cards at once skips the draw */
 
 class Game{
   constructor(opts){ opts=opts||{};
@@ -253,7 +259,8 @@ class Game{
     this.wildIndicator=deck.pop();
     this.wildRank=this.wildIndicator.rank==='JOKER'?'A':this.wildIndicator.rank;
     this.floor=[deck.pop()]; this.deck=deck; this.graveyard=[];
-    this.pendingDiscard=null; this.pendingJacks=0; this.turn=starter; this.starter=starter;
+    this.pendingDiscard=null; this.pendingJacks=0; this.pendingPenalty=0; this.warStarter=null;
+    this.turn=starter; this.starter=starter;
     this.phase='discard'; this.skipEligible=false; this.reveal=false; this.roundResult=null;
     this.lastAction='Round '+this.round+' \u00b7 wild rank is '+this.wildLabel()+' (those cards = 0) \u00b7 '+this.names[starter]+' starts.';
   }
@@ -262,21 +269,57 @@ class Game{
   handPoints(h){ return h.reduce((s,c)=>s+this.cardPoints(c),0); }
   floorRank(){ return this.floor.length?this.floor[0].rank:null; }
   isValidSet(cards){ if(!cards||cards.length<1)return false; const r=cards[0].rank; return cards.every(c=>c.rank===r); }
-  canDeclare(p){ return this.phase==='discard'&&this.turn===p&&this.handPoints(this.hands[p])<=DECLARE_MAX; }
-  declare(p){ if(!this.canDeclare(p))throw new Error("You can only declare on your turn with a hand of "+DECLARE_MAX+" or less."); this._resolveShow(p); }
+  canDeclare(p){ return this.phase==='discard'&&this.turn===p&&this.pendingPenalty===0&&this.handPoints(this.hands[p])<=DECLARE_MAX; }
+  declare(p){
+    if(this.phase==='war')throw new Error("Answer the 7\u2011penalty first \u2014 throw a 7 or pick up "+this.pendingPenalty+".");
+    if(!this.canDeclare(p))throw new Error("You can only declare on your turn with a hand of "+DECLARE_MAX+" or less.");
+    this._resolveShow(p);
+  }
   discard(p,ids){
-    if(this.phase!=='discard'||this.turn!==p)throw new Error("Not your move.");
+    if(this.turn!==p)throw new Error("Not your move.");
+    if(this.phase!=='discard'&&this.phase!=='war')throw new Error("Not your move.");
     const hand=this.hands[p];
+    if(!ids||ids.length<1)throw new Error("Pick at least one card.");
     const chosen=ids.map(id=>hand.find(c=>c.id===id)).filter(Boolean);
     if(chosen.length!==ids.length)throw new Error("Card not in hand.");
     if(!this.isValidSet(chosen))throw new Error("You can only throw cards of the same rank together.");
+    var isSeven=chosen[0].rank===WAR_RANK;
+    if(this.phase==='war'&&!isSeven)throw new Error("You\u2019re under a 7\u2011penalty \u2014 counter with a 7 or pick up "+this.pendingPenalty+".");
     this.hands[p]=hand.filter(c=>ids.indexOf(c.id)===-1);
+    if(isSeven){
+      if(this.phase!=='war') this.warStarter=p;
+      this.pendingPenalty += WAR_PER_CARD*chosen.length;
+      this.graveyard.push.apply(this.graveyard,this.floor);
+      this.floor=chosen; this.pendingDiscard=null;
+      this.skipEligible=false; this.pendingJacks=0;
+      if(this.hands[p].length===0){ if(this.deck.length===0)this._reshuffle(); if(this.deck.length)this.hands[p].push(this.deck.pop()); }
+      this.turn=p^1; this.phase='war';
+      this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' \u2014 '+this.names[p^1]+' must counter with a 7 or pick up '+this.pendingPenalty+' card'+(this.pendingPenalty>1?'s':'')+'.';
+      return {war:true, pendingPenalty:this.pendingPenalty};
+    }
     this.pendingDiscard=chosen;
     this.pendingJacks = chosen[0].rank===SKIP_RANK ? chosen.length : 0;
     this.skipEligible=this.floorRank()!==null&&chosen[0].rank===this.floorRank();
+    if(chosen.length>=BULK_NO_DRAW){
+      this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' \u2014 '+chosen.length+'\u2011card set, no draw.';
+      this._finishTurn();
+      return {skippedDraw:true};
+    }
     this.phase='draw';
     this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+'.';
     return {skipEligible:this.skipEligible};
+  }
+  pickPenalty(p){
+    if(this.phase!=='war'||this.turn!==p)throw new Error("No penalty to pick up.");
+    var count=this.pendingPenalty, picked=0;
+    for(var i=0;i<count;i++){
+      if(this.deck.length===0)this._reshuffle();
+      if(this.deck.length===0)break;
+      this.hands[p].push(this.deck.pop()); picked++;
+    }
+    this.pendingPenalty=0; this.warStarter=null;
+    this.phase='discard'; this.turn=p^1;
+    this.lastAction=this.names[p]+' picked up '+picked+' card'+(picked!==1?'s':'')+' from the 7\u2011penalty.';
   }
   draw(p,source,cardId){
     if(this.phase!=='draw'||this.turn!==p)throw new Error("Not your draw.");
@@ -336,13 +379,14 @@ class Game{
       floor:this.floor.map(c=>({id:c.id,rank:c.rank,suit:c.suit,pts:this.cardPoints(c)})),
       deckCount:this.deck.length, wildRank:this.wildRank, wildIndicator:this.wildIndicator,
       turn:this.turn, yourTurn:this.turn===p, phase:this.phase, skipEligible:this.skipEligible,
+      pendingPenalty:this.pendingPenalty||0,
       canDeclare:this.canDeclare(p), reveal:this.reveal, roundResult:this.roundResult,
       winner:this.winner, lastAction:this.lastAction, declareMax:DECLARE_MAX
     };
   }
 }
-Game.prototype.toData=function(){ var k=['target','penalty','names','scores','round','winner','phase','hands','wildIndicator','wildRank','floor','deck','graveyard','pendingDiscard','pendingJacks','turn','starter','skipEligible','reveal','roundResult','lastAction']; var d={}; for(var i=0;i<k.length;i++)d[k[i]]=this[k[i]]; return d; };
-Game.fromData=function(d){ var g=Object.create(Game.prototype); for(var key in d)g[key]=d[key]; if(g.pendingJacks===undefined)g.pendingJacks=0; return g; };
+Game.prototype.toData=function(){ var k=['target','penalty','names','scores','round','winner','phase','hands','wildIndicator','wildRank','floor','deck','graveyard','pendingDiscard','pendingJacks','pendingPenalty','warStarter','turn','starter','skipEligible','reveal','roundResult','lastAction']; var d={}; for(var i=0;i<k.length;i++)d[k[i]]=this[k[i]]; return d; };
+Game.fromData=function(d){ var g=Object.create(Game.prototype); for(var key in d)g[key]=d[key]; if(g.pendingJacks===undefined)g.pendingJacks=0; if(g.pendingPenalty===undefined)g.pendingPenalty=0; if(g.warStarter===undefined)g.warStarter=null; return g; };
 function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+SUIT_CHAR[c.suit]; }
 
 /* ===== APP STATE ===== */
@@ -480,9 +524,10 @@ function applyAction(p,a){
     else if(a.t==='discard') game.discard(p,a.cardIds);
     else if(a.t==='draw') game.draw(p,a.source,a.cardId);
     else if(a.t==='skip') game.skipDraw(p);
+    else if(a.t==='pickPenalty') game.pickPenalty(p);
     else if(a.t==='nextRound') game.nextRound();
     else if(a.t==='playAgain'){ game=new Game({target:game.target, names:game.names.slice()}); }
-  }catch(e){ if(mode==='host'&&p===0) toast(e.message); return; }
+  }catch(e){ if(mode==='host'&&p===0) toast(e.message); selected.clear(); if(mode==='host') hostSync(); else render(); return; }
   selected.clear();
   if(mode==='host') hostSync(); else render();
 }
@@ -493,9 +538,10 @@ function applyLocal(a){
     else if(a.t==='discard') game.discard(p,a.cardIds);
     else if(a.t==='draw') game.draw(p,a.source,a.cardId);
     else if(a.t==='skip') game.skipDraw(p);
+    else if(a.t==='pickPenalty') game.pickPenalty(p);
     else if(a.t==='nextRound') game.nextRound();
     else if(a.t==='playAgain'){ game=new Game({target:game.target, names:game.names.slice()}); }
-  }catch(e){ toast(e.message); return; }
+  }catch(e){ toast(e.message); selected.clear(); render(); return; }
   selected.clear(); render();
 }
 function startLocal(){ mode='local'; connected=true; game=new Game({target:target, names:[myName||'Player 1','Player 2']}); show('game'); render(); }
@@ -543,7 +589,8 @@ function render(){
   var wild=v.wildIndicator.rank==='JOKER'?'A':v.wildRank;
   $('metaWrap').innerHTML='<span class="pill">Round <b>'+v.round+'</b></span>'+
     '<span class="pill">Wild <b>'+wild+'</b> = 0</span>'+
-    '<span class="pill">Out at <b>'+v.target+'</b></span>';
+    '<span class="pill">Out at <b>'+v.target+'</b></span>'+
+    (v.pendingPenalty>0 ? '<span class="pill" style="border-color:var(--rose); color:#ffd9d2;">7\u2011war \u00b7 <b style="color:var(--rose);">+'+v.pendingPenalty+'</b></span>' : '');
 
   var oz=$('oppZone'); oz.innerHTML='';
   var showOppFace=v.practice||v.reveal;
@@ -559,12 +606,17 @@ function render(){
   var canDraw=myTurn&&v.phase==='draw';
   var deckCol=document.createElement('div'); deckCol.className='tcol';
   var deckLabel=document.createElement('div'); deckLabel.className='tlabel'; deckLabel.textContent='Deck \u00b7 '+v.deckCount;
-  var deckPile=document.createElement('div');
+  var deckPile=document.createElement('div'); deckPile.className='deck-stack';
+  if(v.wildIndicator){
+    var wc=cardEl(v.wildIndicator,{zero:true}); wc.classList.add('wild-under');
+    wc.title='Wild rank \u2014 every '+(v.wildIndicator.rank==='JOKER'?'Ace':v.wildIndicator.rank)+' is worth 0 this round';
+    deckPile.appendChild(wc);
+  }
   if(v.deckCount>0||canDraw){
-    var back=backEl();
+    var back=backEl(); back.classList.add('deck-top');
     if(canDraw){ back.classList.add('click','pick'); back.title='Draw from deck'; back.addEventListener('click',function(){submit({t:'draw',source:'deck'});}); }
     deckPile.appendChild(back);
-  }else{ var e1=document.createElement('div'); e1.className='empty-slot'; e1.textContent='shuffling'; deckPile.appendChild(e1); }
+  }else{ var e1=document.createElement('div'); e1.className='empty-slot deck-top'; e1.textContent='shuffling'; deckPile.appendChild(e1); }
   deckCol.appendChild(deckLabel); deckCol.appendChild(deckPile); tz.appendChild(deckCol);
 
   var floorCol=document.createElement('div'); floorCol.className='tcol';
@@ -587,7 +639,12 @@ function render(){
   mz.appendChild(mTitle);
   var mh=document.createElement('div'); mh.className='hand';
   if(v.round!==lastRound){ mh.classList.add('deal'); lastRound=v.round; }
-  var canPick=myTurn&&v.phase==='discard';
+  var canPick=myTurn&&(v.phase==='discard'||v.phase==='war');
+  if(canPick){
+    var validIds={}; v.yourHand.forEach(function(c){validIds[c.id]=true;});
+    var stale=[]; selected.forEach(function(id){if(!validIds[id])stale.push(id);});
+    stale.forEach(function(id){selected.delete(id);});
+  } else if(selected.size){ selected.clear(); }
   v.yourHand.forEach(function(c,i){
     var opts={zero:c.pts===0, selected:selected.has(c.id)};
     if(canPick){ opts.onClick=function(){toggleSelect(c.id);}; }
@@ -601,6 +658,11 @@ function render(){
 
 function statusText(v){
   if(v.phase==='roundover'||v.phase==='gameover') return '<span class="em">'+escapeHtml(v.lastAction)+'</span>';
+  if(v.phase==='war'){
+    if(mode!=='local'&&!v.yourTurn) return 'Waiting \u2014 <span class="em">'+escapeHtml(v.names[v.you^1])+'</span> must counter the 7 or pick up <b>'+v.pendingPenalty+'</b>.';
+    var who = mode==='local'? escapeHtml(v.names[v.turn])+', counter' : 'Counter';
+    return '<span class="em">7\u2011war!</span> '+who+' with a 7, or pick up <b>'+v.pendingPenalty+'</b> card'+(v.pendingPenalty>1?'s':'')+'.';
+  }
   if(mode!=='local'&&!v.yourTurn) return 'Waiting for <span class="em">'+escapeHtml(v.names[v.you^1])+'</span> to play\u2026';
   if(v.phase==='discard') return mode==='local'? '<span class="em">'+escapeHtml(v.names[v.turn])+'</span>, throw a card or a set \u2014 or declare.' : 'Your move \u2014 throw a card or a set, or declare.';
   if(v.phase==='draw') return 'Now take a card: the deck, or one card from the pile.';
@@ -612,19 +674,46 @@ function renderActions(v){
   var myTurn=v.yourTurn;
   if(v.phase==='roundover'||v.phase==='gameover') return;
   if(mode!=='local'&&!myTurn){ hint.textContent='Sit tight \u2014 it\u2019s their turn.'; return; }
+  var chosen=v.yourHand.filter(function(c){return selected.has(c.id);});
+  var sameRank=chosen.length>=1 && chosen.every(function(c){return c.rank===chosen[0].rank;});
+  var isSeven = sameRank && chosen[0].rank==='7';
+  var isJ = sameRank && chosen[0].rank==='J';
+  if(v.phase==='war'){
+    var pick=document.createElement('button'); pick.className='btn btn-rose';
+    pick.textContent='Pick up '+v.pendingPenalty+' card'+(v.pendingPenalty>1?'s':'');
+    pick.addEventListener('click',function(){submit({t:'pickPenalty'});}); bar.appendChild(pick);
+    var thr=document.createElement('button'); thr.className='btn btn-primary';
+    thr.textContent = isSeven ? (chosen.length>1?'Counter with '+chosen.length+' 7s \u2014 +'+(v.pendingPenalty+WAR_PER_CARD*chosen.length):'Counter with 7 \u2014 +'+(v.pendingPenalty+WAR_PER_CARD)) : 'Counter with 7(s)';
+    thr.disabled = !isSeven;
+    thr.addEventListener('click',function(){submit({t:'discard',cardIds:Array.from(selected)});}); bar.appendChild(thr);
+    if(chosen.length>0 && !isSeven) hint.textContent='Only 7s can counter a 7\u2011penalty.';
+    else if(isSeven) hint.textContent='Counter shoves the penalty back \u2014 they\u2019ll need to answer or pick up '+(v.pendingPenalty+WAR_PER_CARD*chosen.length)+'.';
+    else hint.textContent='Tap your 7(s) to counter, or pick up the '+v.pendingPenalty+'.';
+    return;
+  }
   if(v.phase==='discard'){
     var dec=document.createElement('button'); dec.className='btn btn-rose'; dec.textContent='Declare (show)';
     dec.disabled=!v.canDeclare; dec.addEventListener('click',function(){submit({t:'declare'});}); bar.appendChild(dec);
-    var chosen=v.yourHand.filter(function(c){return selected.has(c.id);});
-    var sameRank=chosen.length>=1 && chosen.every(function(c){return c.rank===chosen[0].rank;});
-    var validSet=sameRank; /* throwing your whole hand is allowed — you'll draw a fresh card */
-    var thr=document.createElement('button'); thr.className='btn btn-primary';
-    var isJ = sameRank && chosen[0].rank==='J';
-    thr.textContent = chosen.length>1 ? ('Throw '+chosen.length+(isJ?' Jacks \u26a1':' cards')) : (isJ?'Throw Jack \u26a1':'Throw card');
-    thr.disabled=!validSet; thr.addEventListener('click',function(){submit({t:'discard',cardIds:Array.from(selected)});}); bar.appendChild(thr);
+    var validSet=sameRank;
+    var thr2=document.createElement('button'); thr2.className='btn btn-primary';
+    var label;
+    if(chosen.length>=BULK_NO_DRAW){
+      label = 'Throw '+chosen.length+(isJ?' Jacks \u26a1':isSeven?' 7s \u2014 +'+(WAR_PER_CARD*chosen.length):' cards')+' (no draw)';
+    } else if(isSeven){
+      label = chosen.length>1 ? 'Throw '+chosen.length+' 7s \u2014 +'+(WAR_PER_CARD*chosen.length) : 'Throw 7 \u2014 +'+WAR_PER_CARD;
+    } else if(isJ){
+      label = chosen.length>1 ? 'Throw '+chosen.length+' Jacks \u26a1' : 'Throw Jack \u26a1';
+    } else {
+      label = chosen.length>1 ? 'Throw '+chosen.length+' cards' : 'Throw card';
+    }
+    thr2.textContent = label;
+    thr2.disabled=!validSet;
+    thr2.addEventListener('click',function(){submit({t:'discard',cardIds:Array.from(selected)});}); bar.appendChild(thr2);
     var dmax=v.declareMax||5;
     if(chosen.length>1&&!sameRank) hint.textContent='Cards thrown together must share the same rank.';
+    else if(isSeven) hint.textContent = chosen.length>1 ? 'Stacked 7s \u2014 opponent picks '+(WAR_PER_CARD*chosen.length)+' unless they counter with a 7.' : 'A 7 makes them pick 2 \u2014 they can counter with another 7.';
     else if(isJ) hint.textContent=chosen.length===1?'A Jack skips their turn \u2014 you\u2019ll go again.':(chosen.length%2===1?'Odd number of Jacks \u2014 you\u2019ll play again.':'Even number of Jacks \u2014 turn passes to them.');
+    else if(chosen.length>=BULK_NO_DRAW) hint.textContent='3+ at once \u2014 you skip the draw this turn.';
     else if(!v.canDeclare&&chosen.length===0) hint.textContent='Tip: get your hand to '+dmax+' or less, then Declare. Throw pairs/sets to shed points fast.';
     else if(chosen.length===0) hint.textContent='Tap cards to select, then throw. Or declare while your hand is '+dmax+' or less.';
     return;
@@ -703,7 +792,9 @@ function showRules(){
       '<li>Each round one card is flipped as the <b>wild rank</b> \u2014 every card of that rank counts as <b>0</b> for the round (if the Joker is flipped, Aces become wild).</li>'+
       '<li>On your turn you either play, or <b>declare</b>.</li>'+
       '<li>To play: <b>(1) throw</b> one card, or several of the <b>same rank</b> at once (this is how you dump points fast). <b>(2) draw</b> one \u2014 from the deck, or take a single card from the pile your partner just threw. If what you threw matches the pile\u2019s rank, you may <b>skip the draw</b>.</li>'+
+      '<li>\uD83E\uDD41 <b>Throwing 3 or more cards</b> at once lets you <b>skip the draw</b> for that turn \u2014 a fast way to shed weight.</li>'+
       '<li>\u26a1 <b>Jacks are skip cards.</b> Throwing one Jack skips your partner\u2019s next turn \u2014 so it comes <b>back to you</b>. Each extra Jack skips one more turn: <b>2 Jacks</b> \u2192 back to your partner, <b>3</b> \u2192 back to you, <b>4</b> \u2192 your partner, and so on. (In short: an odd number of Jacks means you play again; an even number passes the turn over.)</li>'+
+      '<li>\uD83D\uDD25 <b>Sevens are penalty cards.</b> Throw a <b>7</b> and your partner must <b>pick up 2 cards</b>. Throw two 7s and they pick <b>4</b>. They can <b>counter with their own 7(s)</b> instead of picking \u2014 the penalty stacks (+2 per 7) and bounces back to you. Whoever can\u2019t (or won\u2019t) counter picks up the full total; their turn ends and the other plays.</li>'+
       '<li><b>Declare</b> only when your hand totals <b>5 or less</b>, before throwing. All cards are revealed.</li>'+
       '<li><b>Correct show</b> (you\u2019re strictly lowest): you score <b>0</b>; your partner adds their count.</li>'+
       '<li><b>Wrong show</b> (they tied or beat you): you take a <b>+40</b> penalty; if they beat you they score 0.</li>'+
