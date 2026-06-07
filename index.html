@@ -661,35 +661,60 @@ function botRollout(baseData, p, action, count){
 }
 function botHard(g, p, opts){
   var view=g.viewFor(p);
-  opts=opts||{}; var perMove=opts.rollouts||80;
+  opts=opts||{}; var perMove=opts.rollouts||120;
   if(view.phase==='war'){
     /* War decisions are clear-cut: if you have a 7, counter. Rollouts add noise here. */
     return botSmart(g, p);
   }
   if(view.phase==='discard'){
+    /* Rank candidates by the Smart heuristic. If the top pick is decisively ahead, take it.
+       Otherwise let Monte Carlo rollouts refine the choice among the top 3. */
     var pts=g.handPoints(g.hands[p]);
-    var baseData2=g.toData();
-    var cands2=[];
+    var scored=[];
     var moves=botGenerateThrows(g.hands[p]);
     moves.forEach(function(m){
-      cands2.push({t:'discard', cardIds: m.map(function(c){return c.id;})});
+      var s=botSmartScoreThrow(g, p, m, view);
+      scored.push({action:{t:'discard', cardIds: m.map(function(c){return c.id;})}, smartScore:s});
     });
-    if(pts<=5) cands2.push({t:'declare'});
-    if(cands2.length===0) return botSmart(g, p);
-    return botPickBest(cands2, baseData2, p, perMove);
+    if(pts<=5){
+      var dScore = botSmartShouldDeclare(g, p, view) ? 35 : -20;
+      scored.push({action:{t:'declare'}, smartScore: dScore});
+    }
+    if(scored.length===0) return botSmart(g, p);
+    scored.sort(function(a,b){return b.smartScore - a.smartScore;});
+    /* If top score is clearly ahead (≥ 15 over runner-up), skip rollouts. */
+    if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 15){
+      return scored[0].action;
+    }
+    /* Close call: rollouts on the top 3 candidates, hybrid score. */
+    var topN=Math.min(3, scored.length);
+    var baseData=g.toData();
+    var best=scored[0].action, bestS=-Infinity;
+    for(var i=0;i<topN;i++){
+      var rs=botRollout(baseData, p, scored[i].action, perMove);
+      var combined=scored[i].smartScore + rs * 0.45;
+      if(combined > bestS){ bestS=combined; best=scored[i].action; }
+    }
+    return best;
   }
   if(view.phase==='draw'){
-    var baseData3=g.toData();
+    /* For draws, Smart's heuristic is good. Rollouts only when pile has a useful match. */
     var cands3=[{t:'draw', source:'deck'}];
     view.floor.forEach(function(c){
       if(c.rank!=='7' && c.rank!=='J') cands3.push({t:'draw', source:'floor', cardId:c.id});
     });
-    return botPickBest(cands3, baseData3, p, perMove);
+    if(cands3.length===1) return cands3[0];
+    var baseData=g.toData();
+    var bestD=cands3[0], bestDS=-Infinity;
+    cands3.forEach(function(a){
+      var s=botRollout(baseData, p, a, perMove);
+      if(s>bestDS){bestDS=s; bestD=a;}
+    });
+    return bestD;
   }
   return botSmart(g, p);
 }
 function botPickBest(cands, baseData, p, perMove){
-  /* Quick sanity: skip rollouts if only one candidate. */
   if(cands.length===1) return cands[0];
   var best=cands[0], bestS=-Infinity;
   cands.forEach(function(a){
@@ -702,11 +727,9 @@ function botMove(g, p, difficulty){
   try{
     if(difficulty==='easy') return botEasy(g, p);
     if(difficulty==='hard'){
-      /* Budget: ~600 rollouts total, min 80 per candidate. */
-      var view=g.viewFor(p);
-      var moveCount=view.phase==='draw' ? (1 + view.floor.filter(function(c){return c.rank!=='7'&&c.rank!=='J';}).length) : botGenerateThrows(g.hands[p]).length + (g.handPoints(g.hands[p])<=5?1:0);
-      var perMove=Math.max(80, Math.ceil(600/Math.max(1,moveCount)));
-      return botHard(g, p, {rollouts:perMove});
+      /* Hard prunes to top-3 candidates by Smart heuristic, then runs ~150 rollouts each
+         when close calls warrant it. Total budget ~450 rollouts on the hardest decisions. */
+      return botHard(g, p, {rollouts:150});
     }
     return botSmart(g, p);
   }catch(e){
@@ -719,7 +742,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v20';
+var BUILD='v21';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
