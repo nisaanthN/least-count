@@ -661,14 +661,13 @@ function botRollout(baseData, p, action, count){
 }
 function botHard(g, p, opts){
   var view=g.viewFor(p);
-  opts=opts||{}; var perMove=opts.rollouts||120;
+  opts=opts||{}; var perMove=opts.rollouts||250;
   if(view.phase==='war'){
     /* War decisions are clear-cut: if you have a 7, counter. Rollouts add noise here. */
     return botSmart(g, p);
   }
   if(view.phase==='discard'){
-    /* Rank candidates by the Smart heuristic. If the top pick is decisively ahead, take it.
-       Otherwise let Monte Carlo rollouts refine the choice among the top 3. */
+    /* Rank candidates by Smart. If the top pick is decisively ahead, take it. */
     var pts=g.handPoints(g.hands[p]);
     var scored=[];
     var moves=botGenerateThrows(g.hands[p]);
@@ -677,28 +676,27 @@ function botHard(g, p, opts){
       scored.push({action:{t:'discard', cardIds: m.map(function(c){return c.id;})}, smartScore:s});
     });
     if(pts<=5){
-      var dScore = botSmartShouldDeclare(g, p, view) ? 35 : -20;
+      var dScore = botSmartShouldDeclare(g, p, view) ? 40 : -20;
       scored.push({action:{t:'declare'}, smartScore: dScore});
     }
     if(scored.length===0) return botSmart(g, p);
     scored.sort(function(a,b){return b.smartScore - a.smartScore;});
-    /* If top score is clearly ahead (≥ 15 over runner-up), skip rollouts. */
-    if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 15){
+    /* Decisive top pick? Skip rollouts (saves time, avoids noise). */
+    if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 20){
       return scored[0].action;
     }
-    /* Close call: rollouts on the top 3 candidates, hybrid score. */
-    var topN=Math.min(3, scored.length);
+    /* Close call: ~250 rollouts on the top 5 candidates, hybrid score. */
+    var topN=Math.min(5, scored.length);
     var baseData=g.toData();
     var best=scored[0].action, bestS=-Infinity;
     for(var i=0;i<topN;i++){
       var rs=botRollout(baseData, p, scored[i].action, perMove);
-      var combined=scored[i].smartScore + rs * 0.45;
+      var combined=scored[i].smartScore + rs * 0.55;
       if(combined > bestS){ bestS=combined; best=scored[i].action; }
     }
     return best;
   }
   if(view.phase==='draw'){
-    /* For draws, Smart's heuristic is good. Rollouts only when pile has a useful match. */
     var cands3=[{t:'draw', source:'deck'}];
     view.floor.forEach(function(c){
       if(c.rank!=='7' && c.rank!=='J') cands3.push({t:'draw', source:'floor', cardId:c.id});
@@ -727,9 +725,9 @@ function botMove(g, p, difficulty){
   try{
     if(difficulty==='easy') return botEasy(g, p);
     if(difficulty==='hard'){
-      /* Hard prunes to top-3 candidates by Smart heuristic, then runs ~150 rollouts each
-         when close calls warrant it. Total budget ~450 rollouts on the hardest decisions. */
-      return botHard(g, p, {rollouts:150});
+      /* Hard ranks candidates by Smart, picks decisively if one move is clearly ahead.
+         For close calls it runs 250 rollouts × top-5 candidates = up to 1250 rollouts. */
+      return botHard(g, p, {rollouts:250});
     }
     return botSmart(g, p);
   }catch(e){
@@ -742,7 +740,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v21';
+var BUILD='v22';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
