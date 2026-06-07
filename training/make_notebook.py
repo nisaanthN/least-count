@@ -27,6 +27,15 @@ def read(name: str) -> str:
     return (ROOT / name).read_text()
 
 
+def strip_main(src: str) -> str:
+    """Drop the `if __name__ == '__main__':` block — its imports break in a notebook
+    where everything is already in scope, and the smoke tests are unnecessary."""
+    marker = "if __name__ == '__main__':"
+    i = src.find(marker)
+    if i == -1: return src
+    return src[:i].rstrip() + '\n'
+
+
 cells = []
 
 # Header
@@ -88,7 +97,7 @@ cells.append(code_cell(test_src))
 cells.append(md_cell("## Cell 4: Smart bot (baseline + behavior cloning teacher)"))
 bot_src = read('bot_smart.py')
 bot_src = bot_src.replace('from engine import Game', '# Game already in scope')
-cells.append(code_cell(bot_src))
+cells.append(code_cell(strip_main(bot_src)))
 
 # Cell 5: Encoder
 cells.append(md_cell("## Cell 5: State encoder + action space"))
@@ -97,7 +106,7 @@ enc_src = enc_src.replace('from engine import Game', '# Game already in scope')
 # The encoder file has a __main__ block that imports from bot_smart; that's fine in a script
 # but in a notebook, the imports are unnecessary since everything is in scope.
 # We can leave it; it won't execute since __main__ won't be set.
-cells.append(code_cell(enc_src))
+cells.append(code_cell(strip_main(enc_src)))
 
 # Cell 6: Network
 cells.append(md_cell("## Cell 6: Policy + value network"))
