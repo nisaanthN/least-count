@@ -58,19 +58,19 @@ def policy_action(net: PolicyValueNet, state: np.ndarray, mask: np.ndarray,
 
 
 def opp_action(opponent, g, p, device):
-    """Get action from any opponent type (Smart fn or PPO net)."""
-    if callable(opponent):
-        # Smart bot function
-        return opponent(g, p)
-    # Neural net opponent
-    obs = Observer(p)
-    obs.maybe_reset(g)
-    state = encode_state(g, p, obs)
-    mask = legal_action_mask(g, p)
-    if not mask.any():
-        return None
-    aidx, _, _ = policy_action(opponent, state, mask, device, deterministic=False)
-    return action_to_move(g, p, aidx)
+    """Get action from any opponent type (Smart fn or PPO net).
+    Note: nn.Module is callable too, so we must check isinstance FIRST."""
+    if isinstance(opponent, nn.Module):
+        obs = Observer(p)
+        obs.maybe_reset(g)
+        state = encode_state(g, p, obs)
+        mask = legal_action_mask(g, p)
+        if not mask.any():
+            return None
+        aidx, _, _ = policy_action(opponent, state, mask, device, deterministic=False)
+        return action_to_move(g, p, aidx)
+    # Plain Smart bot function (lambda or similar)
+    return opponent(g, p)
 
 
 def play_self_game(net, opponent, device, target=50, max_steps=2000,
