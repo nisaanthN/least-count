@@ -445,7 +445,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v11';
+var BUILD='v12';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
@@ -546,9 +546,37 @@ function fallbackCopy(txt,msg){ var ta=document.createElement('textarea'); ta.va
 function toggleSelect(id){ if(selected.has(id))selected.delete(id); else selected.add(id); render(); }
 
 /* session persistence (best-effort; silently no-ops where storage is blocked) */
-function saveSession(){ if(mode!=='host'||!game)return; try{ localStorage.setItem('lc_session', JSON.stringify({code:roomCode, names:[myName,oppName], ts:Date.now(), game:game.toData()})); }catch(e){} }
-function loadSession(){ try{ var s=localStorage.getItem('lc_session'); if(!s)return null; var o=JSON.parse(s); if(!o||!o.game||Date.now()-o.ts>6*3600*1000){ clearSession(); return null; } return o; }catch(e){ return null; } }
+function saveSession(){
+  if(!mode||mode==='local')return;
+  try{
+    var data={mode:mode, code:roomCode, names:[myName,oppName||'Partner'], ts:Date.now(), target:target};
+    if(mode==='host' && game) data.game=game.toData();
+    localStorage.setItem('lc_session', JSON.stringify(data));
+  }catch(e){}
+}
+function loadSession(){
+  try{
+    var s=localStorage.getItem('lc_session'); if(!s)return null;
+    var o=JSON.parse(s); if(!o||Date.now()-o.ts>6*3600*1000){ clearSession(); return null; }
+    if(o.mode==='host' && !o.game){ clearSession(); return null; }
+    if(!o.mode||!o.code){ clearSession(); return null; }
+    return o;
+  }catch(e){ return null; }
+}
 function clearSession(){ try{ localStorage.removeItem('lc_session'); }catch(e){} }
+function customConfirm(opts){
+  $('overlayMount').innerHTML='<div class="overlay" id="confirmOv"><div class="modal center" style="max-width:380px;">'+
+    '<h2 style="margin:0 0 6px;">'+escapeHtml(opts.title||'Confirm')+'</h2>'+
+    '<div class="res-sub" style="margin-bottom:14px;">'+(opts.html||escapeHtml(opts.msg||''))+'</div>'+
+    '<div class="foot">'+
+      '<button class="btn btn-ghost" id="confirmNo">'+escapeHtml(opts.no||'Cancel')+'</button>'+
+      '<button class="btn btn-rose" id="confirmYes">'+escapeHtml(opts.yes||'Yes')+'</button>'+
+    '</div></div></div>';
+  function close(){ $('overlayMount').innerHTML=''; }
+  $('confirmNo').addEventListener('click', function(){ close(); if(opts.onNo)opts.onNo(); });
+  $('confirmYes').addEventListener('click', function(){ close(); opts.onYes&&opts.onYes(); });
+  $('confirmOv').addEventListener('click', function(e){ if(e.target.id==='confirmOv'){ close(); if(opts.onNo)opts.onNo(); } });
+}
 
 /* ===== HOME WIRING ===== */
 $('targetSeg').addEventListener('click',function(e){ var c=e.target.closest('.chip'); if(!c)return;
@@ -559,7 +587,24 @@ $('btnLocal').addEventListener('click',function(){ myName=(($('nameInput').value
 $('joinCode').addEventListener('keydown',function(e){ if(e.key==='Enter')$('btnJoin').click(); });
 $('btnRules').addEventListener('click',showRules);
 $('btnRules2').addEventListener('click',showRules);
-$('btnQuit').addEventListener('click',function(){ quitting=true; clearSession(); if(peer){try{peer.destroy();}catch(e){}} location.reload(); });
+$('btnQuit').addEventListener('click',function(){
+  var html, yesLabel='Leave';
+  if(mode==='local'){
+    html='Leaving will end this practice game.';
+  } else if(roomCode){
+    html='You\u2019ll be disconnected, but <b>both of you can rejoin</b> using code <b class="gold">'+escapeHtml(roomCode)+'</b>. The game state is saved.';
+  } else {
+    html='Leave this game?';
+  }
+  customConfirm({title:'Leave the game?', html:html, yes:yesLabel, no:'Stay',
+    onYes:function(){
+      quitting=true;
+      if(mode==='local') clearSession(); /* online: keep session so both can rejoin */
+      if(peer){try{peer.destroy();}catch(e){}}
+      location.reload();
+    }
+  });
+});
 
 /* ===== NETWORKING (PeerJS, host-authoritative) ===== */
 function netError(e){
@@ -634,7 +679,7 @@ function onData(d){
     else{ hideBanner(); if(myView){ render(); } }
     return;
   }
-  if(d.type==='state'){ myView=d.view; reconnecting=false; if(!connected){ connected=true; show('game'); } hideBanner(); render(); return; }
+  if(d.type==='state'){ myView=d.view; reconnecting=false; if(!connected){ connected=true; show('game'); } hideBanner(); saveSession(); render(); return; }
   if(mode==='host'){ applyAction(1,d); }
 }
 function hostSync(){ myView=game.viewFor(0); if(conn&&conn.open){ try{conn.send({type:'state', view:game.viewFor(1)});}catch(e){} } saveSession(); render(); }
@@ -1008,11 +1053,17 @@ show('home'); $('buildstamp').textContent=BUILD;
   var s=loadSession();
   if(!s)return;
   var div=document.createElement('div'); div.className='panel'; div.style.borderColor='var(--gold-dim)'; div.style.marginTop='14px';
+  var label = s.mode==='host'
+    ? 'You\u2019re hosting a saved game \u00b7 code <b style="color:var(--gold)">'+escapeHtml(s.code)+'</b>'
+    : 'Rejoin your saved game \u00b7 code <b style="color:var(--gold)">'+escapeHtml(s.code)+'</b>';
   div.innerHTML='<div class="row" style="justify-content:space-between; align-items:center;">'+
-    '<span class="tiny" style="max-width:55%;">You have a game in progress as host \u00b7 code <b style="color:var(--gold)">'+escapeHtml(s.code)+'</b></span>'+
+    '<span class="tiny" style="max-width:60%;">'+label+'</span>'+
     '<span class="row" style="gap:8px;"><button class="btn btn-primary btn-sm" id="btnResume">Resume</button><button class="btn btn-ghost btn-sm" id="btnDiscard">Discard</button></span></div>';
   var home=$('home'); home.insertBefore(div, home.querySelector('.panel'));
-  $('btnResume').addEventListener('click',function(){ resumeHost(s); });
+  $('btnResume').addEventListener('click',function(){
+    if(s.mode==='host'){ resumeHost(s); }
+    else { myName = (s.names && s.names[0]) || myName; target = s.target||target; startJoin(s.code); }
+  });
   $('btnDiscard').addEventListener('click',function(){ clearSession(); div.parentNode.removeChild(div); });
 })();
 </script>
