@@ -659,15 +659,53 @@ function botRollout(baseData, p, action, count){
   }
   return n>0 ? sum/n : 0;
 }
+/* Shared-determinization rollouts: sample N "worlds" once, score every candidate
+   against the same worlds. Eliminates sampling noise between candidates. */
+function botSampleWorlds(baseData, botP, count){
+  var worlds=[];
+  for(var i=0;i<count;i++){
+    var sim=Game.fromData(JSON.parse(JSON.stringify(baseData)));
+    botSampleHidden(sim, botP);
+    worlds.push(sim.toData());
+  }
+  return worlds;
+}
+function botEvaluateOnWorld(worldData, action, botP){
+  var sim=Game.fromData(JSON.parse(JSON.stringify(worldData)));
+  try{
+    botApplySimAction(sim, botP, action);
+    var safety=80;
+    while(sim.phase!=='roundover' && sim.phase!=='gameover' && safety-->0){
+      var curP=sim.turn;
+      var a=botSmart(sim, curP);
+      if(!a) break;
+      botApplySimAction(sim, curP, a);
+    }
+    if(sim.roundResult){
+      return sim.roundResult.deltas[botP^1] - sim.roundResult.deltas[botP];
+    }
+  }catch(e){}
+  return 0;
+}
+function botEvaluateOnWorlds(worlds, action, botP){
+  var total=0, n=0;
+  for(var i=0;i<worlds.length;i++){
+    total += botEvaluateOnWorld(worlds[i], action, botP);
+    n++;
+  }
+  return n>0 ? total/n : 0;
+}
 function botHard(g, p, opts){
   var view=g.viewFor(p);
-  opts=opts||{}; var perMove=opts.rollouts||250;
+  opts=opts||{};
+  var nWorlds = opts.worlds || 400;
+  var topN_cfg = opts.topN || 7;
   if(view.phase==='war'){
     /* War decisions are clear-cut: if you have a 7, counter. Rollouts add noise here. */
     return botSmart(g, p);
   }
   if(view.phase==='discard'){
-    /* Rank candidates by Smart. If the top pick is decisively ahead, take it. */
+    /* 1) Rank every candidate by Smart heuristic. */
     var pts=g.handPoints(g.hands[p]);
     var scored=[];
     var moves=botGenerateThrows(g.hands[p]);
@@ -676,22 +714,23 @@ function botHard(g, p, opts){
       scored.push({action:{t:'discard', cardIds: m.map(function(c){return c.id;})}, smartScore:s});
     });
     if(pts<=5){
-      var dScore = botSmartShouldDeclare(g, p, view) ? 40 : -20;
+      var dScore = botSmartShouldDeclare(g, p, view) ? 45 : -20;
       scored.push({action:{t:'declare'}, smartScore: dScore});
     }
     if(scored.length===0) return botSmart(g, p);
     scored.sort(function(a,b){return b.smartScore - a.smartScore;});
-    /* Decisive top pick? Skip rollouts (saves time, avoids noise). */
-    if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 20){
+    /* 2) Decisive top pick (>= 40 ahead)? Skip rollouts. Otherwise always rollout. */
+    if(scored.length===1 || scored[0].smartScore - scored[1].smartScore >= 40){
       return scored[0].action;
     }
-    /* Close call: ~250 rollouts on the top 5 candidates, hybrid score. */
-    var topN=Math.min(5, scored.length);
+    /* 3) Shared-determinization rollouts: same N worlds across top candidates. */
+    var topN=Math.min(topN_cfg, scored.length);
     var baseData=g.toData();
+    var worlds=botSampleWorlds(baseData, p, nWorlds);
     var best=scored[0].action, bestS=-Infinity;
     for(var i=0;i<topN;i++){
-      var rs=botRollout(baseData, p, scored[i].action, perMove);
-      var combined=scored[i].smartScore + rs * 0.55;
+      var rs=botEvaluateOnWorlds(worlds, scored[i].action, p);
+      var combined=scored[i].smartScore + rs * 0.8;
       if(combined > bestS){ bestS=combined; best=scored[i].action; }
     }
     return best;
@@ -703,9 +742,10 @@ function botHard(g, p, opts){
     });
     if(cands3.length===1) return cands3[0];
     var baseData=g.toData();
+    var worlds=botSampleWorlds(baseData, p, Math.min(200, nWorlds));
     var bestD=cands3[0], bestDS=-Infinity;
     cands3.forEach(function(a){
-      var s=botRollout(baseData, p, a, perMove);
+      var s=botEvaluateOnWorlds(worlds, a, p);
       if(s>bestDS){bestDS=s; bestD=a;}
     });
     return bestD;
@@ -725,9 +765,9 @@ function botMove(g, p, difficulty){
   try{
     if(difficulty==='easy') return botEasy(g, p);
     if(difficulty==='hard'){
-      /* Hard ranks candidates by Smart, picks decisively if one move is clearly ahead.
-         For close calls it runs 250 rollouts × top-5 candidates = up to 1250 rollouts. */
-      return botHard(g, p, {rollouts:250});
+      /* Beast mode: 400 shared determinizations × top-7 candidates = ~2800 evaluations
+         per close-call decision. ~3-6 s per move. */
+      return botHard(g, p, {worlds:400, topN:7});
     }
     return botSmart(g, p);
   }catch(e){
@@ -740,7 +780,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v22';
+var BUILD='v23';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
