@@ -28,12 +28,16 @@ from network import PolicyValueNet, masked_policy
 
 
 def pick_opponent(league: List[PolicyValueNet], device, smart_fn,
-                  rng: random.Random):
-    """Sample an opponent: 50% latest, 30% earlier league, 20% Smart."""
+                  rng: random.Random, smart_frac: float = 0.40):
+    """Sample an opponent.
+    smart_frac fraction of games are vs Smart (anchors policy to known-good baseline).
+    Of the remaining: 60% latest checkpoint, 40% earlier checkpoints (when available)."""
     r = rng.random()
-    if r < 0.20 or not league:
+    if r < smart_frac or not league:
         return 'smart', smart_fn
-    if r < 0.50 and len(league) > 1:
+    # Of the non-Smart portion, half-half-ish split between latest and past
+    r2 = rng.random()
+    if r2 < 0.40 and len(league) > 1:
         opp = rng.choice(league[:-1])
         return 'past', opp
     return 'latest', league[-1]
@@ -75,24 +79,32 @@ def opp_action(opponent, g, p, device):
 
 def play_self_game(net, opponent, device, target=50, max_steps=2000,
                    rng: Optional[random.Random] = None,
-                   bot_p: int = 0, gamma: float = 0.99):
+                   bot_p: int = 0, gamma: float = 0.99,
+                   shape_reward: bool = True):
     """Play one game: net plays as bot_p, opponent plays as 1-bot_p.
-    Returns list of (state, mask, action_idx, logprob, value, reward) for the net's actions only."""
+    Returns list of (state, mask, action_idx, logprob, value, reward) for the net's actions.
+
+    Reward shaping (when shape_reward=True):
+      - small per-step reward = +0.1 * (hand_pts_before - hand_pts_after) — incentivizes dumping
+      - round end: -(my_round_delta - opp_round_delta) (capped at ±40 already by engine)
+      - match end: ±20 for win/loss (smaller than before so signal is less dominated by tail)
+    """
     g = Game(target=target, names=['A','B'], rng=rng)
     obs = Observer(bot_p)
     traj = []
-    last_score_diff = 0  # signed: my_score - opp_score
+    last_score_diff = 0
     steps = 0
+    pts_before_action = g.hand_points(g.hands[bot_p])
     while g.phase != 'gameover' and steps < max_steps:
         if g.phase == 'roundover':
-            # Reward at round end
             diff = g.scores[bot_p] - g.scores[bot_p ^ 1]
-            round_reward = -(diff - last_score_diff)  # we want delta to opp_score - delta to my_score
+            round_reward = -(diff - last_score_diff)
             last_score_diff = diff
             if traj:
                 traj[-1] = (*traj[-1][:5], traj[-1][5] + round_reward)
             g.next_round()
             obs.maybe_reset(g)
+            pts_before_action = g.hand_points(g.hands[bot_p])
             continue
         p = g.turn
         if p == bot_p:
@@ -103,29 +115,109 @@ def play_self_game(net, opponent, device, target=50, max_steps=2000,
             aidx, lp, val = policy_action(net, state, mask, device, deterministic=False)
             a = action_to_move(g, p, aidx)
             try:
-                # record opp's last throw before we move
                 apply_action(g, p, a)
             except Exception:
                 break
-            traj.append((state, mask, aidx, lp, val, 0.0))  # reward set later
+            # Per-step shaping: reward for hand-pts reduction
+            step_reward = 0.0
+            if shape_reward:
+                pts_after = g.hand_points(g.hands[bot_p])
+                step_reward = 0.1 * (pts_before_action - pts_after)
+                pts_before_action = pts_after
+            traj.append((state, mask, aidx, lp, val, step_reward))
         else:
-            # Opponent
             a = opp_action(opponent, g, p, device)
             if a is None: break
-            # Record opp action in net's observer
             opp_floor_snapshot = list(g.floor)
             try:
                 obs.record_opp_action(p, a, opp_floor_snapshot)
                 apply_action(g, p, a)
             except Exception:
                 break
+            if shape_reward:
+                pts_before_action = g.hand_points(g.hands[bot_p])
         steps += 1
-    # Terminal reward: match outcome
     if g.winner is not None:
-        match_reward = 50.0 if g.winner == bot_p else -50.0
+        # Match reward (smaller; round rewards already cover most signal)
+        match_reward = 20.0 if g.winner == bot_p else -20.0
         if traj:
             traj[-1] = (*traj[-1][:5], traj[-1][5] + match_reward)
     return traj, g.winner
+
+
+def pretrain_value(net, device, num_games: int = 1000, epochs: int = 3,
+                   batch_size: int = 256, lr: float = 5e-4):
+    """Fit the value head to Monte Carlo returns from Smart-vs-Smart games.
+    Runs AFTER BC. Stabilizes PPO by giving the critic a good initialization."""
+    from behavior_clone import collect_smart_samples  # already in scope in notebook
+    print(f'  Value pretrain: rolling out {num_games} Smart vs Smart games to collect returns...')
+    # Replay Smart-vs-Smart games, compute MC returns at each (bot, state).
+    samples = []
+    rng = random.Random(99)
+    for gi in range(num_games):
+        g = Game(target=50, names=['A','B'], rng=random.Random(gi + 7777))
+        per_player_traj = {0: [], 1: []}
+        per_player_last_diff = {0: 0, 1: 0}
+        per_player_obs = {0: Observer(0), 1: Observer(1)}
+        steps = 0
+        while g.phase != 'gameover' and steps < 1500:
+            if g.phase == 'roundover':
+                for p in (0, 1):
+                    diff = g.scores[p] - g.scores[p ^ 1]
+                    rr = -(diff - per_player_last_diff[p])
+                    per_player_last_diff[p] = diff
+                    if per_player_traj[p]:
+                        s, _ = per_player_traj[p][-1]
+                        per_player_traj[p][-1] = (s, per_player_traj[p][-1][1] + rr)
+                g.next_round()
+                continue
+            p = g.turn
+            per_player_obs[p].maybe_reset(g)
+            state = encode_state(g, p, per_player_obs[p])
+            per_player_traj[p].append((state, 0.0))
+            try:
+                a = bot_smart(g, p)
+                per_player_obs[p ^ 1].record_opp_action(p, a, list(g.floor))
+                apply_action(g, p, a)
+            except Exception:
+                break
+            steps += 1
+        if g.winner is not None:
+            for p in (0, 1):
+                mr = 20.0 if g.winner == p else -20.0
+                if per_player_traj[p]:
+                    s, r = per_player_traj[p][-1]
+                    per_player_traj[p][-1] = (s, r + mr)
+        # Compute discounted returns
+        for p in (0, 1):
+            traj = per_player_traj[p]
+            G = 0.0
+            for i in reversed(range(len(traj))):
+                s, r = traj[i]
+                G = r + 0.99 * G
+                samples.append((s, G))
+    print(f'  Collected {len(samples)} (state, return) pairs')
+    if not samples: return
+    import numpy as np
+    states_arr = np.stack([s for s, _ in samples])
+    returns_arr = np.array([G for _, G in samples], dtype=np.float32)
+    states_t = torch.from_numpy(states_arr).float().to(device)
+    returns_t = torch.from_numpy(returns_arr).float().to(device)
+    # Train only value head + shared (light)
+    optimizer = optim.Adam(net.parameters(), lr=lr)
+    N = len(states_t)
+    for ep in range(epochs):
+        perm = torch.randperm(N)
+        total_loss = 0
+        for i in range(0, N, batch_size):
+            idx = perm[i:i+batch_size]
+            _, v = net(states_t[idx])
+            loss = ((v - returns_t[idx]) ** 2).mean()
+            optimizer.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 0.5)
+            optimizer.step()
+            total_loss += loss.item() * len(idx)
+        print(f'  value epoch {ep+1}: MSE={total_loss/N:.3f}')
 
 
 def compute_gae(traj, gamma: float = 0.99, lam: float = 0.95):

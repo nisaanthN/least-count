@@ -190,26 +190,44 @@ else:
     print(f'Current win rate vs Smart: {wr*100:.0f}%')
 """))
 
-# Cell 10: PPO training
-cells.append(md_cell("""## Cell 10: PPO self-play with league (LONG — 4-10 hours)
+# Cell 10: PPO training (improved — value pretrain, lower LR, more Smart in league, anti-collapse)
+cells.append(md_cell("""## Cell 10: PPO self-play with league + value pretrain + anti-collapse
 
-Trains policy via self-play + league play. Evaluates vs Smart periodically. Auto-stops when win rate plateaus.
+Improved over the first run. Key changes:
+- **Value pretrain** before PPO: critic learns Monte Carlo returns from Smart games (prevents bad-value→bad-gradient cascade).
+- **LR**: 1e-4 (was 3e-4) — slower, more stable updates.
+- **Clip ratio**: 0.1 (was 0.2) — smaller per-step policy changes.
+- **40% Smart in league** (was 20%) — anchors policy.
+- **Linear LR warmup** for first 10K games.
+- **Reward shaping**: small per-step reward for hand-pt reduction (denser signal).
+- **Anti-collapse**: if win rate drops 10pp below best for 3 evals, roll back to best + halve LR.
 
-You can stop and resume; checkpoints save every 30 min."""))
+Run AFTER Cell 9 (BC). ~4-8 hours."""))
 cells.append(code_cell("""\
 # Hyperparams
-TOTAL_GAMES = 200_000        # Total self-play games
-EVAL_EVERY = 5_000           # Eval vs Smart every N games
-CKPT_EVERY_MIN = 30          # Save checkpoint every 30 min wall time
-BATCH_SIZE = 4096            # Transitions per PPO update
-LR = 3e-4
-TARGET = 50                  # Train at target=50 for shorter games
+TOTAL_GAMES = 200_000
+EVAL_EVERY = 5_000
+CKPT_EVERY_MIN = 30
+BATCH_SIZE = 4096
+LR_BASE = 1e-4              # Was 3e-4 (lowered for stability)
+LR_WARMUP_GAMES = 10_000
+CLIP_RATIO = 0.1            # Was 0.2 (tighter)
+TARGET = 50
+SMART_FRAC = 0.40           # Was 0.20
 
-# Initialize from BC
+# Step 1: Pretrain value head on Smart-vs-Smart MC returns
+print('Pretraining value head on Smart returns...')
+pretrain_value(net, device, num_games=600, epochs=3, batch_size=256, lr=5e-4)
+
+# Eval after value pretrain
+net.eval()
+wr = eval_vs_smart(net, device, num_games=30, target=TARGET)
+print(f'After BC + value pretrain: win rate vs Smart = {wr*100:.0f}%')
+
+# Step 2: PPO
 net.train()
-optimizer = optim.Adam(net.parameters(), lr=LR)
+optimizer = optim.Adam(net.parameters(), lr=LR_BASE)
 
-# League: starts with current net only; we add snapshots as we go
 import copy
 def snapshot():
     snap = PolicyValueNet().to(device)
@@ -218,56 +236,71 @@ def snapshot():
     return snap
 
 league = [snapshot()]
-best_winrate = 0.0
+best_winrate = wr  # start from post-BC+value baseline
+torch.save(net.state_dict(), '/content/policy_best.pt')
 last_ckpt_t = time.time()
 games_played = 0
 batch = []
 rng = random.Random(0)
+regression_count = 0  # consecutive evals below best
 
 start_t = time.time()
 print(f'Starting PPO at {time.strftime("%H:%M:%S")}')
 
 while games_played < TOTAL_GAMES:
-    # Sample opponent
+    # LR warmup
+    if games_played < LR_WARMUP_GAMES:
+        warmup_lr = LR_BASE * (0.1 + 0.9 * games_played / LR_WARMUP_GAMES)
+        for g_ in optimizer.param_groups:
+            g_['lr'] = warmup_lr
+
     opp_kind, opponent = pick_opponent(league, device,
                                        lambda g, p: bot_smart(g, p),
-                                       rng)
-    # Play one game (net is player 0)
-    traj, winner = play_self_game(net, opponent, device, target=TARGET, rng=random.Random())
+                                       rng, smart_frac=SMART_FRAC)
+    traj, winner = play_self_game(net, opponent, device, target=TARGET,
+                                  rng=random.Random(), shape_reward=True)
     games_played += 1
 
-    # Compute GAE + add to batch
     advs, rets = compute_gae(traj)
     for k, t in enumerate(traj):
-        # t = (state, mask, aidx, lp, value, reward); extend with adv, ret
         batch.append(t + (advs[k], rets[k]))
 
-    # Once batch is big enough, do PPO update
     if len(batch) >= BATCH_SIZE:
-        ppo_update(net, optimizer, batch, device)
+        ppo_update(net, optimizer, batch, device, clip_ratio=CLIP_RATIO)
         batch = []
 
-    # Periodic eval
     if games_played % EVAL_EVERY == 0:
         net.eval()
         wr = eval_vs_smart(net, device, num_games=40, target=TARGET)
         elapsed_min = (time.time() - start_t) / 60
-        print(f'[{games_played:>6}/{TOTAL_GAMES} games, {elapsed_min:.0f} min] win rate vs Smart: {wr*100:.0f}%')
+        cur_lr = optimizer.param_groups[0]['lr']
+        print(f'[{games_played:>6}/{TOTAL_GAMES} games, {elapsed_min:.0f} min, lr={cur_lr:.1e}] win vs Smart: {wr*100:.0f}%')
         if wr > best_winrate:
             best_winrate = wr
+            regression_count = 0
             torch.save(net.state_dict(), '/content/policy_best.pt')
             print(f'  ↑ new best ({wr*100:.0f}%), saved /content/policy_best.pt')
+        elif wr < best_winrate - 0.10:
+            regression_count += 1
+            print(f'  ↓ regression ({wr*100:.0f}% vs best {best_winrate*100:.0f}%); count={regression_count}/3')
+            if regression_count >= 3:
+                # Roll back to best and lower LR
+                net.load_state_dict(torch.load('/content/policy_best.pt'))
+                new_lr = max(optimizer.param_groups[0]['lr'] * 0.5, 1e-5)
+                for g_ in optimizer.param_groups:
+                    g_['lr'] = new_lr
+                regression_count = 0
+                print(f'  ↩ rolled back to best, LR -> {new_lr:.1e}')
+        else:
+            regression_count = max(0, regression_count - 1)
         net.train()
-        # Add snapshot to league periodically
         if games_played % (EVAL_EVERY * 2) == 0 and len(league) < 10:
             league.append(snapshot())
 
-    # Periodic checkpoint
     if time.time() - last_ckpt_t > CKPT_EVERY_MIN * 60:
         torch.save(net.state_dict(), '/content/policy_latest.pt')
         last_ckpt_t = time.time()
 
-# Final save
 torch.save(net.state_dict(), '/content/policy_final.pt')
 print(f'Done. Best win rate vs Smart: {best_winrate*100:.0f}%')
 """))
