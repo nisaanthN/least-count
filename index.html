@@ -262,21 +262,21 @@ class Game{
     this.round+=1; const deck=shuffle(makeDeck());
     this.hands=[[],[]];
     for(let i=0;i<7;i++){ this.hands[0].push(deck.pop()); this.hands[1].push(deck.pop()); }
-    /* wild indicator can't be a 7 or Jack (those are power/penalty cards) \u2014 push them to the bottom and redraw */
+    /* wild indicator can't be a 7, Jack, or Joker \u2014 push them to the bottom and redraw */
     var skipped=[];
     this.wildIndicator=deck.pop();
-    while(this.wildIndicator && (this.wildIndicator.rank===WAR_RANK || this.wildIndicator.rank===SKIP_RANK)){
+    while(this.wildIndicator && (this.wildIndicator.rank===WAR_RANK || this.wildIndicator.rank===SKIP_RANK || this.wildIndicator.rank==='JOKER')){
       skipped.push(this.wildIndicator); this.wildIndicator=deck.pop();
     }
     for(var si=0;si<skipped.length;si++) deck.unshift(skipped[si]);
-    this.wildRank=this.wildIndicator.rank==='JOKER'?'A':this.wildIndicator.rank;
+    this.wildRank=this.wildIndicator.rank;
     this.floor=[deck.pop()]; this.deck=deck; this.graveyard=[];
     this.pendingDiscard=null; this.pendingJacks=0; this.pendingSevens=0; this.pendingPenalty=0; this.warStarter=null;
     this.turn=starter; this.starter=starter;
     this.phase='discard'; this.skipEligible=false; this.reveal=false; this.roundResult=null;
     this.lastAction='Round '+this.round+' \u00b7 wild rank is '+this.wildLabel()+' (those cards = 0) \u00b7 '+this.names[starter]+' starts.';
   }
-  wildLabel(){ return this.wildIndicator.rank==='JOKER'?'A':this.wildRank; }
+  wildLabel(){ return this.wildRank; }
   cardPoints(c){ if(c.rank==='JOKER')return 0; if(c.rank===this.wildRank)return 0; return rankValue(c.rank); }
   handPoints(h){ return h.reduce((s,c)=>s+this.cardPoints(c),0); }
   floorRank(){ return this.floor.length?this.floor[0].rank:null; }
@@ -302,16 +302,18 @@ class Game{
     this.pendingDiscard=chosen;
     this.pendingJacks  = isJack  ? chosen.length : 0;
     this.pendingSevens = isSeven ? chosen.length : 0;
-    /* 7s and Jacks never let you skip the draw via pile-match */
-    this.skipEligible = !isSeven && !isJack && this.floorRank()!==null && chosen[0].rank===this.floorRank();
-    if(chosen.length>=BULK_NO_DRAW){
-      this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' \u2014 '+chosen.length+'\u2011card set, no draw.';
+    var matchesPile = this.floorRank()!==null && chosen[0].rank===this.floorRank();
+    this.skipEligible = matchesPile;
+    var bulk = chosen.length>=BULK_NO_DRAW;
+    if(bulk || matchesPile){
+      var reason = bulk && matchesPile ? chosen.length+'\u2011card set, matches the pile' : bulk ? chosen.length+'\u2011card set' : 'matches the pile';
+      this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+' ('+reason+', no draw).';
       this._finishTurn();
-      return {skippedDraw:true, war:this.phase==='war'};
+      return {skippedDraw:true, war:this.phase==='war', matchedPile:matchesPile};
     }
     this.phase='draw';
     this.lastAction=this.names[p]+' threw '+chosen.map(labelCard).join(' ')+'.';
-    return {skipEligible:this.skipEligible, pendingSevens:this.pendingSevens};
+    return {skipEligible:false, pendingSevens:this.pendingSevens};
   }
   pickPenalty(p){
     if(this.phase!=='war'||this.turn!==p)throw new Error("No penalty to pick up.");
@@ -756,7 +758,6 @@ function renderActions(v){
     return;
   }
   if(v.phase==='draw'){
-    if(v.skipEligible && v.yourHand.length>=1){ var sk=document.createElement('button'); sk.className='btn btn-ghost'; sk.textContent='Skip draw (matched pile)'; sk.addEventListener('click',function(){submit({t:'skip'});}); bar.appendChild(sk); }
     hint.textContent='Tap the deck or a pile card to pick it up.';
     return;
   }
@@ -826,9 +827,9 @@ function showRules(){
     '<div class="res-sub">Two players. Lowest hand wins each round; the first to reach the target score is knocked out and the other wins.</div>'+
     '<ul class="rules-list">'+
       '<li>You\u2019re each dealt <b>7 cards</b>. Points: <b>A = 1</b>, 2\u201310 = face value, <b>J / Q / K = 10</b>, Joker = 0.</li>'+
-      '<li>Each round one card is flipped as the <b>wild rank</b> \u2014 every card of that rank counts as <b>0</b> for the round (if the Joker is flipped, Aces become wild). <b>7s and Jacks can never be wild</b> \u2014 they\u2019re power cards.</li>'+
+      '<li>Each round one card is flipped as the <b>wild rank</b> \u2014 every card of that rank counts as <b>0</b> for the round. <b>7s, Jacks, and Jokers can never be wild</b> \u2014 they\u2019re power cards (the flip re-rolls).</li>'+
       '<li>On your turn you either play, or <b>declare</b>.</li>'+
-      '<li>To play: <b>(1) throw</b> one card, or several of the <b>same rank</b> at once (this is how you dump points fast). <b>(2) draw</b> one \u2014 from the deck, or take a single card from the pile your partner just threw (<b>7s and Jacks</b> can\u2019t be picked from the pile). If what you threw matches the pile\u2019s rank, you may <b>skip the draw</b>.</li>'+
+      '<li>To play: <b>(1) throw</b> one card, or several of the <b>same rank</b> at once (this is how you dump points fast). <b>(2) draw</b> one \u2014 from the deck, or take a single card from the pile your partner just threw (<b>7s and Jacks</b> can\u2019t be picked from the pile). <b>Skipping the draw is automatic</b> when your throw matches the open pile\u2019s top rank (any rank, including 7s and Js), or when you throw 3+ cards at once.</li>'+
       '<li>\uD83E\uDD41 <b>Throwing 3 or more cards</b> at once lets you <b>skip the draw</b> for that turn \u2014 a fast way to shed weight.</li>'+
       '<li>\u26a1 <b>Jacks are skip cards.</b> Throwing one Jack skips your partner\u2019s next turn \u2014 so it comes <b>back to you</b>. Each extra Jack skips one more turn: <b>2 Jacks</b> \u2192 back to your partner, <b>3</b> \u2192 back to you, <b>4</b> \u2192 your partner, and so on. (In short: an odd number of Jacks means you play again; an even number passes the turn over.)</li>'+
       '<li>\uD83D\uDD25 <b>Sevens are penalty cards.</b> Throw a <b>7</b> and your partner must <b>pick up 2 cards</b>. Throw two 7s and they pick <b>4</b>. They can <b>counter with their own 7(s)</b> instead of picking \u2014 the penalty stacks (+2 per 7) and bounces back to you. Whoever can\u2019t (or won\u2019t) counter picks up the full total; their turn ends and the other plays.</li>'+
