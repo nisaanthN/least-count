@@ -172,7 +172,7 @@
   #toast{position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(20px); background:rgba(0,0,0,.85); color:#fff; padding:12px 18px; border-radius:12px; font-size:14px; opacity:0; transition:.3s; z-index:99; max-width:90vw; text-align:center; border:1px solid rgba(255,255,255,.15);}
   #toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
   #banner{position:fixed; top:0; left:0; right:0; z-index:60; background:linear-gradient(180deg,#7a2b24,#5a1f1a); color:#fff; text-align:center; padding:10px; font-size:14px; display:none;}
-  a.link{color:var(--gold); text-decoration:underline; cursor:pointer;}
+  a.link, button.link{color:var(--gold); text-decoration:underline; cursor:pointer; background:transparent; border:none; padding:0; font:inherit; font-family:inherit;}
   .footnote{margin-top:auto; padding-top:18px; text-align:center;}
 </style>
 </head>
@@ -227,7 +227,7 @@
     </div>
 
     <div class="center" style="margin-top:14px;">
-      <a class="link" id="btnRules">How do you play Least Count?</a>
+      <button type="button" class="link" id="btnRules">How do you play Least Count?</button>
     </div>
     <div class="footnote tiny">Built for two. ♠ Have fun.</div>
   </section>
@@ -248,9 +248,9 @@
     <div class="hint" id="hintLine"></div>
     <div class="actionbar" id="actionBar"></div>
     <div class="center" style="margin-top:6px;">
-      <a class="link" id="btnRules2" style="font-size:12.5px;">Rules</a>
+      <button type="button" class="link" id="btnRules2" style="font-size:12.5px;">Rules</button>
       &nbsp;·&nbsp;
-      <a class="link" id="btnQuit" style="font-size:12.5px;">Leave game</a>
+      <button type="button" class="link" id="btnQuit" style="font-size:12.5px;">Leave game</button>
     </div>
   </section>
 
@@ -825,7 +825,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v25';
+var BUILD='v26';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -908,11 +908,23 @@ var lastRound=-1, overlayKey='';
 var resuming=false, resumeRetries=0, quitting=false, reconnecting=false;
 var ID_PREFIX='leastcount-v1-';
 var CODE_CHARS='ACDEFHJKMNPRTUVWXY';
-var PEER_OPTS={ debug:1, config:{ iceServers:[
+var ICE_SERVERS=[
   {urls:'stun:stun.l.google.com:19302'},
   {urls:'stun:stun1.l.google.com:19302'},
   {urls:'stun:global.stun.twilio.com:3478'}
-]}};
+];
+/* Broker fallback list: try default PeerJS broker first; on socket failure, try each
+   subsequent entry. {} = use library default (0.peerjs.com). Add custom self-hosted
+   brokers here later by pushing {host, port, path, secure} entries. */
+var PEER_BROKERS=[{}];
+var brokerIdx=0, brokerRetries=0, MAX_BROKER_RETRIES=3;
+function currentPeerOpts(){
+  var b=PEER_BROKERS[brokerIdx]||{};
+  var opts={debug:1, config:{iceServers:ICE_SERVERS}};
+  if(b.host){opts.host=b.host; opts.port=b.port||443; opts.path=b.path||'/'; opts.secure=b.secure!==false;}
+  return opts;
+}
+var PEER_OPTS=currentPeerOpts();
 
 function show(screen){ ['home','lobby','game'].forEach(function(s){ $(s).classList.toggle('hide', s!==screen); }); }
 function toast(msg,ms){ ms=ms||3200; var t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(function(){t.classList.remove('show');},ms); }
@@ -1015,7 +1027,31 @@ function netError(e){
   if(t==='peer-unavailable'){ toast("No game found with that code. Double\u2011check it, and make sure your partner tapped Create first.",5000); show('home'); return; }
   if(t==='browser-incompatible'){ toast("This browser can't do peer\u2011to\u2011peer. Try Chrome, Safari or Firefox.",6000); return; }
   if(t==='network'||t==='server-error'||t==='socket-error'||t==='socket-closed'){
-    toast("Couldn't reach the connection server. If you're inside the Claude chat window, online mode is blocked here \u2014 download the file and host it, or use Practice mode.",8000);
+    // Transient broker failure — try again with backoff before surfacing the error.
+    if(brokerRetries < MAX_BROKER_RETRIES){
+      brokerRetries++;
+      var delay = 1500 * brokerRetries;
+      try{peer.destroy();}catch(x){}
+      toast("Connection server unreachable \u2014 retrying ("+brokerRetries+"/"+MAX_BROKER_RETRIES+")\u2026", delay);
+      setTimeout(function(){
+        if(quitting) return;
+        if(mode==='host') createHostPeer();
+        else if(mode==='join') startJoin(roomCode);
+      }, delay);
+      return;
+    }
+    // Retries exhausted: try next broker in fallback list (if any)
+    if(brokerIdx < PEER_BROKERS.length - 1){
+      brokerIdx++; brokerRetries=0;
+      try{peer.destroy();}catch(x){}
+      setTimeout(function(){
+        if(quitting) return;
+        if(mode==='host') createHostPeer();
+        else if(mode==='join') startJoin(roomCode);
+      }, 500);
+      return;
+    }
+    toast("Couldn't reach the connection server after several tries. Try switching network (Wi\u2011Fi \u2194 mobile data), turning on a VPN, or use Practice mode.", 9000);
     show('home'); return;
   }
   console.warn('peer error',e); toast('Connection error: '+t);
@@ -1033,18 +1069,19 @@ function resumeHost(s){
   renderLobbyHost(true); show('lobby'); createHostPeer();
 }
 function createHostPeer(){
-  try{ peer=new Peer(ID_PREFIX+roomCode, PEER_OPTS); }catch(e){ netError({type:'browser-incompatible'}); return; }
+  try{ peer=new Peer(ID_PREFIX+roomCode, currentPeerOpts()); }catch(e){ netError({type:'browser-incompatible'}); return; }
   peer.on('error',netError);
   peer.on('disconnected',function(){ try{peer.reconnect();}catch(x){} });
+  peer.on('open',function(){ brokerRetries=0; });
   // accept the latest connection — if a partner refreshes/rejoins, take the new conn and resync
   peer.on('connection',function(c){ conn=c; wireConn(); });
 }
 function startJoin(code){
   mode='join'; roomCode=code; renderLobbyJoin(); show('lobby');
-  try{ peer=new Peer(PEER_OPTS); }catch(e){ netError({type:'browser-incompatible'}); return; }
+  try{ peer=new Peer(currentPeerOpts()); }catch(e){ netError({type:'browser-incompatible'}); return; }
   peer.on('error',function(e){ if(e&&e.type==='peer-unavailable'&&connected===false&&reconnecting){ return; } netError(e); });
   peer.on('disconnected',function(){ try{peer.reconnect();}catch(x){} });
-  peer.on('open',function(){ conn=peer.connect(ID_PREFIX+code,{reliable:true}); wireConn(); });
+  peer.on('open',function(){ brokerRetries=0; conn=peer.connect(ID_PREFIX+code,{reliable:true}); wireConn(); });
 }
 function joinReconnect(){
   if(mode!=='join'||quitting||reconnecting)return;
