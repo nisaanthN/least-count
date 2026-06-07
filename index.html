@@ -730,7 +730,7 @@ function botMove(g, p, difficulty){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v18';
+var BUILD='v19';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -990,7 +990,7 @@ function hostSync(){ myView=game.viewFor(0); if(conn&&conn.open){ try{conn.send(
 
 /* ===== ACTION ROUTING ===== */
 function submit(action){
-  if(mode==='local') return applyLocal(action);
+  if(mode==='local'||mode==='bot') return applyLocal(action);
   if(mode==='host')  return applyAction(0,action);
   if(mode==='join'){ if(conn&&conn.open) conn.send(action); else toast('Not connected.'); }
 }
