@@ -428,7 +428,7 @@ function labelCard(c){ if(c.rank==='JOKER')return '\uD83C\uDCCF'; return c.rank+
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v7';
+var BUILD='v8';
 var handOrders=[[],[]]; /* per-player display order of card IDs */
 function orderedHand(hand, p){
   var hor=handOrders[p]||[];
