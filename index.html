@@ -1050,7 +1050,7 @@ function botNN(g, p){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v29';
+var BUILD='v30';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -1138,12 +1138,10 @@ var ICE_SERVERS=[
   {urls:'stun:stun1.l.google.com:19302'},
   {urls:'stun:global.stun.twilio.com:3478'}
 ];
-/* Broker fallback list: primary is our self-hosted Fly broker; if that becomes
-   unreachable, fall back to the public PeerJS default. {} = library default. */
-var PEER_BROKERS=[
-  {host:'least-count-broker.fly.dev', port:443, path:'/lc', secure:true},
-  {},
-];
+/* Broker list. {} = PeerJS library default (0.peerjs.com). Self-hosted broker entries
+   (e.g. {host:'least-count-broker.fly.dev', port:443, path:'/lc', secure:true}) can be
+   pushed onto the front of this array later if the default proves unreliable. */
+var PEER_BROKERS=[{}];
 var brokerIdx=0, brokerRetries=0, MAX_BROKER_RETRIES=3;
 function currentPeerOpts(){
   var b=PEER_BROKERS[brokerIdx]||{};
