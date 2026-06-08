@@ -217,6 +217,7 @@
             <button class="chip" data-d="easy">Easy</button>
             <button class="chip active" data-d="smart">Smart</button>
             <button class="chip" data-d="hard">Hard</button>
+            <button class="chip" data-d="nn" title="Experimental: a neural net trained via self-play to beat Smart.">Neural β</button>
           </div>
           <button class="btn btn-primary full" id="btnBot">Start vs Computer →</button>
         </div>
@@ -809,6 +810,7 @@ function botPickBest(cands, baseData, p, perMove){
 function botMove(g, p, difficulty){
   try{
     if(difficulty==='easy') return botEasy(g, p);
+    if(difficulty==='nn') return botNN(g, p);
     if(difficulty==='hard'){
       /* Beast mode: 400 shared determinizations × top-7 candidates = ~2800 evaluations
          per close-call decision. ~3-6 s per move. */
@@ -821,11 +823,234 @@ function botMove(g, p, difficulty){
   }
 }
 
+/* ===== EXPERIMENTAL NEURAL BOT (β) =====
+   Loads weights from policy_weights.json (PolicyValueNet exported from training/).
+   Mirrors training/encoder.py exactly so the model sees the same features it trained on.
+   Pure-JS forward pass — no tf.js, no WebGL. */
+var NN_ALL_RANKS=['A','2','3','4','5','6','7','8','9','10','J','Q','K','JOKER'];
+var NN_RANK_INDEX={}; for(var __i=0;__i<NN_ALL_RANKS.length;__i++) NN_RANK_INDEX[NN_ALL_RANKS[__i]]=__i;
+var NN_STATE_DIM=103, NN_ACTION_DIM=45;
+var NN_ACT_T1=0, NN_ACT_T2=14, NN_ACT_T3=28, NN_ACT_DECLARE=42, NN_ACT_DRAW_DECK=43, NN_ACT_DRAW_PILE=44;
+
+var nnWeights=null, nnLoadPromise=null;
+var nnObs={oppPilePicks:{}, lastOppThrowRank:null, lastOppThrowCount:0, lastRoundSeen:-1};
+
+function nnObserverReset(){
+  nnObs.oppPilePicks={};
+  for(var i=0;i<NN_ALL_RANKS.length;i++) nnObs.oppPilePicks[NN_ALL_RANKS[i]]=0;
+  nnObs.lastOppThrowRank=null;
+  nnObs.lastOppThrowCount=0;
+}
+function nnObserverMaybeReset(g){
+  if(g.round !== nnObs.lastRoundSeen){
+    nnObserverReset();
+    nnObs.lastRoundSeen=g.round;
+  }
+}
+function nnObserverRecord(p, action, floorBefore){
+  /* Called for opponent (non-bot) actions, BEFORE the engine applies them. */
+  if(p === BOT_PLAYER) return;
+  if(action.t === 'draw' && action.source === 'floor'){
+    for(var i=0;i<floorBefore.length;i++){
+      if(floorBefore[i].id === action.cardId){
+        var r=floorBefore[i].rank;
+        nnObs.oppPilePicks[r]=(nnObs.oppPilePicks[r]||0)+1;
+        break;
+      }
+    }
+  } else if(action.t === 'discard'){
+    var ids=action.cardIds||[];
+    if(ids.length>0){
+      var first=ids[0], rank=null;
+      if(first.indexOf('JOKER')===0) rank='JOKER';
+      else if(first.indexOf('10')===0) rank='10';
+      else rank=first.charAt(0);
+      nnObs.lastOppThrowRank=rank;
+      nnObs.lastOppThrowCount=ids.length;
+    }
+  }
+}
+
+function nnLoadWeights(){
+  if(nnWeights) return Promise.resolve(nnWeights);
+  if(nnLoadPromise) return nnLoadPromise;
+  nnLoadPromise = fetch('policy_weights.json', {cache:'force-cache'})
+    .then(function(r){ if(!r.ok) throw new Error('weights '+r.status); return r.json(); })
+    .then(function(j){ nnWeights=j; return j; })
+    .catch(function(e){ nnLoadPromise=null; throw e; });
+  return nnLoadPromise;
+}
+
+function nnEncodeState(g, botP){
+  nnObserverMaybeReset(g);
+  var s=new Float32Array(NN_STATE_DIM);
+  var idx=0, i;
+  var hand=g.hands[botP];
+  var handCounts={}; for(i=0;i<hand.length;i++) handCounts[hand[i].rank]=(handCounts[hand[i].rank]||0)+1;
+  for(i=0;i<14;i++) s[idx+i] = (handCounts[NN_ALL_RANKS[i]]||0)/8.0;
+  idx+=14;
+  if(g.floor.length>0){
+    var ftr=g.floor[0].rank;
+    if(NN_RANK_INDEX.hasOwnProperty(ftr)) s[idx+NN_RANK_INDEX[ftr]]=1.0;
+  }
+  idx+=14;
+  s[idx++] = g.floor.length/8.0;
+  var pickable=0; for(i=0;i<g.floor.length;i++){ if(g.floor[i].rank!=='7'&&g.floor[i].rank!=='J') pickable++; }
+  s[idx++] = pickable/4.0;
+  if(g.floor.length>0){
+    var ftr2=g.floor[0].rank, matches=false;
+    for(i=0;i<hand.length;i++){ if(hand[i].rank===ftr2){ matches=true; break; } }
+    s[idx]=matches?1.0:0.0;
+  }
+  idx++;
+  if(NN_RANK_INDEX.hasOwnProperty(g.wildRank)) s[idx+NN_RANK_INDEX[g.wildRank]]=1.0;
+  idx+=14;
+  s[idx++] = g.deck.length/106.0;
+  s[idx++] = g.hands[botP^1].length/12.0;
+  var graveCounts={};
+  for(i=0;i<g.graveyard.length;i++) graveCounts[g.graveyard[i].rank]=(graveCounts[g.graveyard[i].rank]||0)+1;
+  for(i=0;i<14;i++) s[idx+i]=(graveCounts[NN_ALL_RANKS[i]]||0)/8.0;
+  idx+=14;
+  var tgt=Math.max(g.target,1);
+  s[idx++]=g.scores[botP]/tgt;
+  s[idx++]=g.scores[botP^1]/tgt;
+  s[idx++]=g.target/200.0;
+  s[idx++]=Math.min(g.round,20)/20.0;
+  s[idx++]=(g.starter===botP)?1.0:0.0;
+  var phaseMap={discard:0,draw:1,war:2};
+  if(phaseMap.hasOwnProperty(g.phase)) s[idx+phaseMap[g.phase]]=1.0;
+  idx+=3;
+  s[idx++]=g.pendingPenalty/20.0;
+  s[idx++]=g.pendingJacks/4.0;
+  for(i=0;i<14;i++) s[idx+i]=(nnObs.oppPilePicks[NN_ALL_RANKS[i]]||0)/4.0;
+  idx+=14;
+  if(nnObs.lastOppThrowRank && NN_RANK_INDEX.hasOwnProperty(nnObs.lastOppThrowRank))
+    s[idx+NN_RANK_INDEX[nnObs.lastOppThrowRank]]=1.0;
+  idx+=14;
+  s[idx++]=Math.min(nnObs.lastOppThrowCount,4)/4.0;
+  var nPairs=0, nTriples=0, maxSet=0;
+  for(var rk in handCounts){
+    var cnt=handCounts[rk];
+    if(cnt===2) nPairs++;
+    if(cnt>=3) nTriples++;
+    if(cnt>maxSet) maxSet=cnt;
+  }
+  s[idx++]=nPairs/6.0;
+  s[idx++]=nTriples/3.0;
+  s[idx++]=maxSet/8.0;
+  return s;
+}
+
+function nnLegalMask(g, p){
+  var mask=new Uint8Array(NN_ACTION_DIM);
+  if(g.phase==='discard' || g.phase==='war'){
+    var hand=g.hands[p], handCounts={};
+    for(var i=0;i<hand.length;i++) handCounts[hand[i].rank]=(handCounts[hand[i].rank]||0)+1;
+    for(var r in handCounts){
+      if(!NN_RANK_INDEX.hasOwnProperty(r)) continue;
+      var ri=NN_RANK_INDEX[r], cnt=handCounts[r];
+      if(cnt>=1) mask[NN_ACT_T1+ri]=1;
+      if(cnt>=2) mask[NN_ACT_T2+ri]=1;
+      if(cnt>=3) mask[NN_ACT_T3+ri]=1;
+    }
+    if(g.canDeclare(p)) mask[NN_ACT_DECLARE]=1;
+  }
+  if(g.phase==='draw'){
+    mask[NN_ACT_DRAW_DECK]=1;
+    for(var j=0;j<g.floor.length;j++){
+      if(g.floor[j].rank!=='7' && g.floor[j].rank!=='J'){ mask[NN_ACT_DRAW_PILE]=1; break; }
+    }
+  }
+  return mask;
+}
+
+function nnActionToMove(g, p, idx){
+  if(idx===NN_ACT_DECLARE) return {t:'declare'};
+  if(idx===NN_ACT_DRAW_DECK) return {t:'draw', source:'deck'};
+  if(idx===NN_ACT_DRAW_PILE){
+    for(var i=0;i<g.floor.length;i++){
+      if(g.floor[i].rank!=='7' && g.floor[i].rank!=='J')
+        return {t:'draw', source:'floor', cardId:g.floor[i].id};
+    }
+    return null;
+  }
+  var size, ri;
+  if(idx < NN_ACT_T2){ size=1; ri=idx-NN_ACT_T1; }
+  else if(idx < NN_ACT_T3){ size=2; ri=idx-NN_ACT_T2; }
+  else if(idx < NN_ACT_DECLARE){ size=3; ri=idx-NN_ACT_T3; }
+  else return null;
+  var rank=NN_ALL_RANKS[ri];
+  var matches=[];
+  for(var k=0;k<g.hands[p].length;k++) if(g.hands[p][k].rank===rank) matches.push(g.hands[p][k]);
+  if(matches.length===0) return null;
+  if(size===1) return {t:'discard', cardIds:[matches[0].id]};
+  if(size===2 && matches.length>=2) return {t:'discard', cardIds:[matches[0].id, matches[1].id]};
+  return {t:'discard', cardIds: matches.map(function(c){return c.id;})};
+}
+
+function nnLayerNorm(x, gamma, beta){
+  var n=x.length, mean=0, m2=0, i;
+  for(i=0;i<n;i++) mean+=x[i];
+  mean/=n;
+  for(i=0;i<n;i++){ var d=x[i]-mean; m2+=d*d; }
+  var std=Math.sqrt(m2/n + 1e-5);
+  var y=new Float32Array(n);
+  for(i=0;i<n;i++) y[i]=((x[i]-mean)/std)*gamma[i]+beta[i];
+  return y;
+}
+function nnLinear(x, W, b){
+  /* W: [out][in], b: [out], x: [in] -> [out] */
+  var outDim=W.length, inDim=x.length, y=new Float32Array(outDim);
+  for(var i=0;i<outDim;i++){
+    var row=W[i], s=b[i];
+    for(var j=0;j<inDim;j++) s+=row[j]*x[j];
+    y[i]=s;
+  }
+  return y;
+}
+function nnRelu(x){ var y=new Float32Array(x.length); for(var i=0;i<x.length;i++) y[i]=x[i]>0?x[i]:0; return y; }
+
+function nnForward(state){
+  var w=nnWeights.weights;
+  var h=nnLinear(state, w['shared.0.weight'], w['shared.0.bias']);
+  h=nnLayerNorm(h, w['shared.1.weight'], w['shared.1.bias']);
+  h=nnRelu(h);
+  h=nnLinear(h, w['shared.3.weight'], w['shared.3.bias']);
+  h=nnLayerNorm(h, w['shared.4.weight'], w['shared.4.bias']);
+  h=nnRelu(h);
+  return nnLinear(h, w['policy_head.weight'], w['policy_head.bias']);
+}
+
+function botNN(g, p){
+  if(!nnWeights){
+    /* Weights not loaded yet — fall back to Smart for this move; loader is already in flight. */
+    nnLoadWeights().catch(function(e){ toast('Neural weights failed to load: '+e.message, 4000); });
+    return botSmart(g, p);
+  }
+  try{
+    var state=nnEncodeState(g, p);
+    var mask=nnLegalMask(g, p);
+    var logits=nnForward(state);
+    /* Mask + argmax. Mask out illegal actions with -Infinity. */
+    var best=-1, bestS=-Infinity;
+    for(var i=0;i<NN_ACTION_DIM;i++){
+      if(!mask[i]) continue;
+      if(logits[i] > bestS){ bestS=logits[i]; best=i; }
+    }
+    if(best<0) return botSmart(g, p);
+    var mv=nnActionToMove(g, p, best);
+    return mv || botSmart(g, p);
+  }catch(e){
+    console.warn('NN bot fell back to Smart:', e);
+    return botSmart(g, p);
+  }
+}
+
 /* ===== APP STATE ===== */
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v27';
+var BUILD='v28';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -995,7 +1220,12 @@ $('targetSeg').addEventListener('click',function(e){ var c=e.target.closest('.ch
 $('btnHost').addEventListener('click',function(){ myName=(($('nameInput').value||'Player 1').trim().slice(0,14))||'Player 1'; startHost(); });
 $('btnJoin').addEventListener('click',function(){ var code=(($('joinCode').value||'').trim().toUpperCase()); if(code.length<4){toast('Enter the 4\u2011letter code your partner gave you.');return;} myName=(($('nameInput').value||'Player 2').trim().slice(0,14))||'Player 2'; startJoin(code); });
 $('btnLocal').addEventListener('click',function(){ myName=(($('nameInput').value||'Player 1').trim().slice(0,14))||'Player 1'; startLocal(); });
-$('botDiffSeg').addEventListener('click',function(e){ var c=e.target.closest('.chip'); if(!c)return; var kids=$('botDiffSeg').children; for(var i=0;i<kids.length;i++)kids[i].classList.remove('active'); c.classList.add('active'); botDifficulty=c.dataset.d; });
+$('botDiffSeg').addEventListener('click',function(e){
+  var c=e.target.closest('.chip'); if(!c)return;
+  var kids=$('botDiffSeg').children; for(var i=0;i<kids.length;i++)kids[i].classList.remove('active');
+  c.classList.add('active'); botDifficulty=c.dataset.d;
+  if(botDifficulty==='nn'){ nnLoadWeights().catch(function(err){ toast('Could not load neural weights: '+err.message, 4000); }); }
+});
 $('btnBot').addEventListener('click',function(){ myName=(($('nameInput').value||'You').trim().slice(0,14))||'You'; startBot(); });
 $('joinCode').addEventListener('keydown',function(e){ if(e.key==='Enter')$('btnJoin').click(); });
 $('btnRules').addEventListener('click',showRules);
@@ -1142,6 +1372,11 @@ function applyAction(p,a){
 }
 function applyLocal(a){
   var p=game.turn;
+  /* Record opp move for the NN bot's observer BEFORE the engine mutates the floor. */
+  if(mode==='bot' && botDifficulty==='nn' && p!==BOT_PLAYER){
+    var floorBefore=game.floor.slice();
+    nnObserverRecord(p, a, floorBefore);
+  }
   try{
     if(a.t==='declare') game.declare(p);
     else if(a.t==='discard') game.discard(p,a.cardIds);
@@ -1162,7 +1397,7 @@ function resumeLocal(s){
   target=game.target;
   show('game'); render();
 }
-function botLabelFor(d){ return d==='easy'?'Easy':d==='hard'?'Hard':'Smart'; }
+function botLabelFor(d){ return d==='easy'?'Easy':d==='hard'?'Hard':d==='nn'?'Neural β':'Smart'; }
 function startBot(){
   clearSession();
   mode='bot'; connected=true; botPending=false;
