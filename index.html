@@ -1050,7 +1050,7 @@ function botNN(g, p){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v28';
+var BUILD='v29';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -1452,12 +1452,10 @@ function currentView(){
     v.practice=true; return v;
   }
   if(mode==='bot'){
-    /* Always render from the human's perspective (player 0). */
+    /* Render from the human's perspective (player 0). The bot's hand stays hidden
+       until the round resolves — engine's viewFor sets oppHand only when reveal=true. */
     var v2=game.viewFor(0);
-    /* For testing, show bot's hand face-up. Set practice flag so reveal renders. */
-    v2.oppHand=game.hands[1].map(function(c){return {id:c.id,rank:c.rank,suit:c.suit,pts:game.cardPoints(c)};});
-    v2.oppPoints=game.handPoints(game.hands[1]);
-    v2.practice=true; v2.bot=true;
+    v2.bot=true;
     return v2;
   }
   return myView;
