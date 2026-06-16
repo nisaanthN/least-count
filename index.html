@@ -1061,7 +1061,7 @@ function botNN(g, p){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v32';
+var BUILD='v33';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -1154,6 +1154,45 @@ function dlog(msg, cls){
   p.appendChild(row);
   while(p.children.length>500) p.removeChild(p.firstChild);
   p.scrollTop=p.scrollHeight;
+}
+/* Wrap RTCPeerConnection BEFORE PeerJS creates any. This is the only reliable way to
+   catch every ICE candidate from the moment gathering begins. */
+if(DBG && window.RTCPeerConnection){
+  var __OrigPC = window.RTCPeerConnection;
+  window.RTCPeerConnection = function(cfg){
+    var pc = new __OrigPC(cfg);
+    dlog('RTCPeerConnection created, '+((cfg&&cfg.iceServers)||[]).length+' ICE servers configured','info');
+    pc.addEventListener('icecandidate', function(e){
+      if(!e.candidate){ dlog('ICE: gathering complete','info'); return; }
+      var c = e.candidate.candidate || '';
+      var typ = (c.match(/typ (\S+)/)||[])[1] || '?';
+      var proto = (c.match(/(udp|tcp|UDP|TCP)/)||[])[1] || '?';
+      dlog('ICE candidate ['+typ+'/'+proto+']: '+c.slice(0,120), typ==='relay'?'ok':'info');
+    });
+    pc.addEventListener('iceconnectionstatechange', function(){
+      var s=pc.iceConnectionState;
+      dlog('iceConnectionState='+s, (s==='connected'||s==='completed')?'ok':(s==='failed'?'err':'info'));
+      if(s==='failed' && pc.localDescription){
+        // Dump candidate types from local SDP to retroactively confirm what was gathered
+        var sdp = pc.localDescription.sdp || '';
+        var types = {};
+        sdp.split('\n').forEach(function(line){
+          var m = line.match(/^a=candidate:\S+\s+\d+\s+(\S+)\s+\d+\s+(\S+)\s+\d+\s+typ\s+(\S+)/i);
+          if(m){ types[m[3]] = (types[m[3]]||0)+1; }
+        });
+        dlog('FAILED — local candidates gathered: '+JSON.stringify(types),'err');
+      }
+    });
+    pc.addEventListener('connectionstatechange', function(){
+      var s=pc.connectionState;
+      dlog('connectionState='+s, s==='connected'?'ok':(s==='failed'?'err':'info'));
+    });
+    pc.addEventListener('icegatheringstatechange', function(){
+      dlog('iceGatheringState='+pc.iceGatheringState,'info');
+    });
+    return pc;
+  };
+  window.RTCPeerConnection.prototype = __OrigPC.prototype;
 }
 var ID_PREFIX='leastcount-v1-';
 var CODE_CHARS='ACDEFHJKMNPRTUVWXY';
@@ -1380,31 +1419,6 @@ function joinReconnect(){
 }
 function wireConn(){
   dlog('wireConn: '+(conn&&conn.peer),'info');
-  if(DBG){
-    /* Hook into PeerJS's underlying RTCPeerConnection to log ICE candidates and connection state.
-       PeerJS exposes it via conn.peerConnection (sometimes lazily attached). Poll briefly. */
-    var hooked=false;
-    var poll=setInterval(function(){
-      if(hooked || !conn || !conn.peerConnection) return;
-      hooked=true; clearInterval(poll);
-      var pc=conn.peerConnection;
-      try{
-        pc.addEventListener('icecandidate', function(e){
-          if(!e.candidate) return dlog('ICE: candidate gathering complete','info');
-          var c=e.candidate.candidate||'';
-          var type=(c.match(/typ (\S+)/)||[])[1]||'?';
-          dlog('ICE candidate: '+type+'  '+c.slice(0,90),'info');
-        });
-        pc.addEventListener('iceconnectionstatechange', function(){
-          dlog('iceConnectionState='+pc.iceConnectionState, pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed'?'ok':'info');
-        });
-        pc.addEventListener('connectionstatechange', function(){
-          dlog('connectionState='+pc.connectionState, pc.connectionState==='connected'?'ok':'info');
-        });
-      }catch(e){ dlog('hook ICE: '+e.message,'err'); }
-    }, 200);
-    setTimeout(function(){ clearInterval(poll); }, 8000);
-  }
   conn.on('open',function(){ dlog('conn.on(open) \u2014 data channel OPEN','ok'); try{ conn.send({type:'hello', name:myName}); }catch(e){} });
   conn.on('data',onData);
   conn.on('close',function(){
