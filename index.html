@@ -1061,7 +1061,7 @@ function botNN(g, p){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v31';
+var BUILD='v32';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -1157,10 +1157,17 @@ function dlog(msg, cls){
 }
 var ID_PREFIX='leastcount-v1-';
 var CODE_CHARS='ACDEFHJKMNPRTUVWXY';
+/* STUN helps each peer discover its own public IP. TURN relays packets when peers
+   can't reach each other directly (common when both are behind the same home router
+   that doesn't support NAT hairpinning, or behind carrier-grade NAT). Free public
+   TURN below — rate-limited but plenty for a 2-player game. */
 var ICE_SERVERS=[
   {urls:'stun:stun.l.google.com:19302'},
   {urls:'stun:stun1.l.google.com:19302'},
-  {urls:'stun:global.stun.twilio.com:3478'}
+  {urls:'stun:global.stun.twilio.com:3478'},
+  {urls:'turn:openrelay.metered.ca:80',  username:'openrelayproject', credential:'openrelayproject'},
+  {urls:'turn:openrelay.metered.ca:443', username:'openrelayproject', credential:'openrelayproject'},
+  {urls:'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject'}
 ];
 /* Broker list. {} = PeerJS library default (0.peerjs.com). Self-hosted broker entries
    (e.g. {host:'least-count-broker.fly.dev', port:443, path:'/lc', secure:true}) can be
@@ -1373,6 +1380,31 @@ function joinReconnect(){
 }
 function wireConn(){
   dlog('wireConn: '+(conn&&conn.peer),'info');
+  if(DBG){
+    /* Hook into PeerJS's underlying RTCPeerConnection to log ICE candidates and connection state.
+       PeerJS exposes it via conn.peerConnection (sometimes lazily attached). Poll briefly. */
+    var hooked=false;
+    var poll=setInterval(function(){
+      if(hooked || !conn || !conn.peerConnection) return;
+      hooked=true; clearInterval(poll);
+      var pc=conn.peerConnection;
+      try{
+        pc.addEventListener('icecandidate', function(e){
+          if(!e.candidate) return dlog('ICE: candidate gathering complete','info');
+          var c=e.candidate.candidate||'';
+          var type=(c.match(/typ (\S+)/)||[])[1]||'?';
+          dlog('ICE candidate: '+type+'  '+c.slice(0,90),'info');
+        });
+        pc.addEventListener('iceconnectionstatechange', function(){
+          dlog('iceConnectionState='+pc.iceConnectionState, pc.iceConnectionState==='connected'||pc.iceConnectionState==='completed'?'ok':'info');
+        });
+        pc.addEventListener('connectionstatechange', function(){
+          dlog('connectionState='+pc.connectionState, pc.connectionState==='connected'?'ok':'info');
+        });
+      }catch(e){ dlog('hook ICE: '+e.message,'err'); }
+    }, 200);
+    setTimeout(function(){ clearInterval(poll); }, 8000);
+  }
   conn.on('open',function(){ dlog('conn.on(open) \u2014 data channel OPEN','ok'); try{ conn.send({type:'hello', name:myName}); }catch(e){} });
   conn.on('data',onData);
   conn.on('close',function(){
@@ -1837,11 +1869,9 @@ if(DBG){
   dlog('online='+navigator.onLine+' protocol='+location.protocol+' host='+location.host,'info');
   dlog('PeerJS lib='+(window.Peer&&Peer.version||'unknown'),'info');
   dlog('brokers='+JSON.stringify(PEER_BROKERS),'info');
-  // Pre-flight reachability probes
+  // Pre-flight HTTPS probe to broker. STUN/TURN use UDP and can't be probed via fetch.
   brokerProbe();
-  fetch('https://stun.l.google.com:19302',{mode:'no-cors',cache:'no-store'})
-    .then(function(){ dlog('STUN host stun.l.google.com reachable','ok'); })
-    .catch(function(e){ dlog('STUN probe error: '+e.message,'err'); });
+  dlog('ICE servers: '+ICE_SERVERS.length+' (incl. '+ICE_SERVERS.filter(function(s){return /^turn:/.test(s.urls);}).length+' TURN)','info');
   $('dbgCopy').addEventListener('click', function(){
     var lines=Array.prototype.map.call($('dbgPanel').children,function(r){return r.textContent;}).join('\n');
     copyText(lines,'Debug log copied');
