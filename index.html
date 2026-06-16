@@ -144,6 +144,15 @@
   .card.drop-target{outline:3px dashed var(--gold); outline-offset:3px;}
   .hand .card{touch-action:none;}
   .buildstamp{position:fixed; bottom:6px; right:8px; font-size:10px; color:rgba(255,255,255,.32); pointer-events:none; z-index:5; letter-spacing:.4px;}
+  #dbgPanel{position:fixed; left:6px; right:6px; bottom:30px; max-height:55vh; background:rgba(0,0,0,.88); color:#9fefb4; font-family:Menlo,Consolas,monospace; font-size:10.5px; line-height:1.35; border:1px solid rgba(159,239,180,.35); border-radius:8px; padding:6px 8px; overflow-y:auto; z-index:9999; display:none;}
+  #dbgPanel.on{display:block;}
+  #dbgPanel .row{white-space:pre-wrap; word-break:break-all;}
+  #dbgPanel .err{color:#ff8a7a;}
+  #dbgPanel .ok{color:#9fefb4;}
+  #dbgPanel .info{color:#ffe1a8;}
+  #dbgBar{position:fixed; left:6px; right:6px; bottom:6px; display:none; gap:6px; z-index:9999;}
+  #dbgBar.on{display:flex;}
+  #dbgBar button{flex:1; background:#222; color:#9fefb4; border:1px solid rgba(159,239,180,.35); border-radius:6px; padding:4px 8px; font-size:11px;}
   .deal .card{animation:dealin .4s cubic-bezier(.2,.8,.25,1) backwards;}
   @keyframes dealin{from{opacity:0; transform:translateY(26px) scale(.9) rotate(-6deg);}}
 
@@ -179,6 +188,8 @@
 <body>
 <div id="banner"></div>
 <div class="buildstamp" id="buildstamp"></div>
+<div id="dbgPanel"></div>
+<div id="dbgBar"><button id="dbgCopy">Copy logs</button><button id="dbgClear">Clear</button><button id="dbgClose">Hide</button></div>
 <div id="app">
 
   <section id="home">
@@ -1050,7 +1061,7 @@ function botNN(g, p){
 var $=function(id){return document.getElementById(id);};
 var mode=null, game=null, myView=null, peer=null, conn=null, connected=false;
 var lastFloorIds='';
-var BUILD='v30';
+var BUILD='v31';
 var BOT_PLAYER=1;
 var botDifficulty='smart';
 var botPending=false;
@@ -1131,6 +1142,19 @@ var myName='You', oppName='Partner', target=100, roomCode='';
 var selected=new Set();
 var lastRound=-1, overlayKey='';
 var resuming=false, resumeRetries=0, quitting=false, reconnecting=false;
+/* Debug overlay: append ?debug=1 to the URL to enable. Captures broker events,
+   PeerJS internal logs, and a pre-flight broker reachability probe. */
+var DBG=false; try{ DBG=new URLSearchParams(location.search).has('debug'); }catch(e){}
+function dlog(msg, cls){
+  if(!DBG) return;
+  var p=document.getElementById('dbgPanel'); if(!p) return;
+  var d=new Date(), t=d.toISOString().slice(11,23);
+  var row=document.createElement('div'); row.className='row '+(cls||'');
+  row.textContent='['+t+'] '+msg;
+  p.appendChild(row);
+  while(p.children.length>500) p.removeChild(p.firstChild);
+  p.scrollTop=p.scrollHeight;
+}
 var ID_PREFIX='leastcount-v1-';
 var CODE_CHARS='ACDEFHJKMNPRTUVWXY';
 var ICE_SERVERS=[
@@ -1145,9 +1169,24 @@ var PEER_BROKERS=[{}];
 var brokerIdx=0, brokerRetries=0, MAX_BROKER_RETRIES=3;
 function currentPeerOpts(){
   var b=PEER_BROKERS[brokerIdx]||{};
-  var opts={debug:1, config:{iceServers:ICE_SERVERS}};
+  var opts={debug:DBG?3:1, config:{iceServers:ICE_SERVERS}};
   if(b.host){opts.host=b.host; opts.port=b.port||443; opts.path=b.path||'/'; opts.secure=b.secure!==false;}
   return opts;
+}
+function brokerProbe(){
+  if(!DBG) return Promise.resolve();
+  var b=PEER_BROKERS[brokerIdx]||{};
+  var url = b.host ? ('https://'+b.host+':'+(b.port||443)+(b.path||'/')+'/peerjs/id') : 'https://0.peerjs.com/peerjs/id';
+  dlog('probing broker HTTP: '+url, 'info');
+  var t0=Date.now();
+  return fetch(url,{cache:'no-store'}).then(function(r){
+    dlog('  HTTP '+r.status+' in '+(Date.now()-t0)+'ms', r.ok?'ok':'err');
+    return r.text();
+  }).then(function(txt){
+    dlog('  body: '+(txt||'').slice(0,80), 'info');
+  }).catch(function(e){
+    dlog('  HTTP probe FAILED: '+(e&&e.message||e), 'err');
+  });
 }
 var PEER_OPTS=currentPeerOpts();
 
@@ -1299,19 +1338,24 @@ function resumeHost(s){
   renderLobbyHost(true); show('lobby'); createHostPeer();
 }
 function createHostPeer(){
-  try{ peer=new Peer(ID_PREFIX+roomCode, currentPeerOpts()); }catch(e){ netError({type:'browser-incompatible'}); return; }
-  peer.on('error',netError);
-  peer.on('disconnected',function(){ try{peer.reconnect();}catch(x){} });
-  peer.on('open',function(){ brokerRetries=0; });
-  // accept the latest connection — if a partner refreshes/rejoins, take the new conn and resync
-  peer.on('connection',function(c){ conn=c; wireConn(); });
+  var opts=currentPeerOpts();
+  dlog('createHostPeer: id='+ID_PREFIX+roomCode+', brokerIdx='+brokerIdx+', opts='+JSON.stringify({host:opts.host||'default',port:opts.port,path:opts.path,secure:opts.secure}),'info');
+  brokerProbe();
+  try{ peer=new Peer(ID_PREFIX+roomCode, opts); }catch(e){ dlog('Peer ctor threw: '+e.message,'err'); netError({type:'browser-incompatible'}); return; }
+  peer.on('error',function(e){ dlog('peer.on(error): type='+(e&&e.type)+' msg='+(e&&e.message||''),'err'); netError(e); });
+  peer.on('disconnected',function(){ dlog('peer.on(disconnected)','err'); try{peer.reconnect();}catch(x){} });
+  peer.on('open',function(id){ dlog('peer.on(open): id='+id,'ok'); brokerRetries=0; });
+  peer.on('connection',function(c){ dlog('peer.on(connection): from '+(c&&c.peer),'ok'); conn=c; wireConn(); });
 }
 function startJoin(code){
   mode='join'; roomCode=code; renderLobbyJoin(); show('lobby');
-  try{ peer=new Peer(currentPeerOpts()); }catch(e){ netError({type:'browser-incompatible'}); return; }
-  peer.on('error',function(e){ if(e&&e.type==='peer-unavailable'&&connected===false&&reconnecting){ return; } netError(e); });
-  peer.on('disconnected',function(){ try{peer.reconnect();}catch(x){} });
-  peer.on('open',function(){ brokerRetries=0; conn=peer.connect(ID_PREFIX+code,{reliable:true}); wireConn(); });
+  var opts=currentPeerOpts();
+  dlog('startJoin: code='+code+', brokerIdx='+brokerIdx,'info');
+  brokerProbe();
+  try{ peer=new Peer(opts); }catch(e){ dlog('Peer ctor threw: '+e.message,'err'); netError({type:'browser-incompatible'}); return; }
+  peer.on('error',function(e){ dlog('peer.on(error): type='+(e&&e.type)+' msg='+(e&&e.message||''),'err'); if(e&&e.type==='peer-unavailable'&&connected===false&&reconnecting){ return; } netError(e); });
+  peer.on('disconnected',function(){ dlog('peer.on(disconnected)','err'); try{peer.reconnect();}catch(x){} });
+  peer.on('open',function(id){ dlog('peer.on(open): id='+id+', dialing '+ID_PREFIX+code,'ok'); brokerRetries=0; conn=peer.connect(ID_PREFIX+code,{reliable:true}); wireConn(); });
 }
 function joinReconnect(){
   if(mode!=='join'||quitting||reconnecting)return;
@@ -1328,15 +1372,17 @@ function joinReconnect(){
   })();
 }
 function wireConn(){
-  conn.on('open',function(){ try{ conn.send({type:'hello', name:myName}); }catch(e){} });
+  dlog('wireConn: '+(conn&&conn.peer),'info');
+  conn.on('open',function(){ dlog('conn.on(open) \u2014 data channel OPEN','ok'); try{ conn.send({type:'hello', name:myName}); }catch(e){} });
   conn.on('data',onData);
   conn.on('close',function(){
+    dlog('conn.on(close)','err');
     connected=false;
     if(quitting)return;
     if(mode==='join'){ joinReconnect(); }
     else { banner("Your partner dropped \u2014 waiting for them to rejoin with code <b>"+roomCode+"</b>\u2026"); }
   });
-  conn.on('error',function(e){ console.warn('conn error',e); });
+  conn.on('error',function(e){ dlog('conn.on(error): '+(e&&e.type||e&&e.message||e),'err'); console.warn('conn error',e); });
 }
 function onData(d){
   if(d.type==='hello'){
@@ -1784,6 +1830,27 @@ if(typeof Peer==='undefined'){
   $('btnHost').addEventListener('click',function(){ toast('Online needs an internet connection to set up. Practice mode works offline.',5000); },true);
 }
 show('home'); $('buildstamp').textContent=BUILD;
+if(DBG){
+  $('dbgPanel').classList.add('on'); $('dbgBar').classList.add('on');
+  dlog('=== DEBUG MODE ===','info');
+  dlog('BUILD='+BUILD+' UA='+navigator.userAgent,'info');
+  dlog('online='+navigator.onLine+' protocol='+location.protocol+' host='+location.host,'info');
+  dlog('PeerJS lib='+(window.Peer&&Peer.version||'unknown'),'info');
+  dlog('brokers='+JSON.stringify(PEER_BROKERS),'info');
+  // Pre-flight reachability probes
+  brokerProbe();
+  fetch('https://stun.l.google.com:19302',{mode:'no-cors',cache:'no-store'})
+    .then(function(){ dlog('STUN host stun.l.google.com reachable','ok'); })
+    .catch(function(e){ dlog('STUN probe error: '+e.message,'err'); });
+  $('dbgCopy').addEventListener('click', function(){
+    var lines=Array.prototype.map.call($('dbgPanel').children,function(r){return r.textContent;}).join('\n');
+    copyText(lines,'Debug log copied');
+  });
+  $('dbgClear').addEventListener('click', function(){ $('dbgPanel').innerHTML=''; });
+  $('dbgClose').addEventListener('click', function(){ $('dbgPanel').classList.remove('on'); $('dbgBar').classList.remove('on'); });
+  // Capture netError calls + retry events for visibility
+  var origToast=window.toast; window.toast=function(m,ms){ dlog('TOAST: '+m,'info'); return origToast(m,ms); };
+}
 window.addEventListener('beforeunload', function(){ if(mode&&mode!=='local') saveSession(); });
 document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='hidden' && mode && mode!=='local') saveSession(); });
 (function(){
